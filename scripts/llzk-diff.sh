@@ -1,34 +1,45 @@
 #!/usr/bin/env bash
-# llzk-diff.sh — compare veir-opt and llzk-opt round-trips for an .mlir input.
+# llzk-diff.sh — compare veir-opt and llzk-opt output for an .mlir input.
 #
 # Exit codes:
 #   0   identical (modulo normalization + allowlist)
-#   1   differs
+#   1   differs after both tools succeeded
 #   2   bad invocation / unreadable input
+#   3   veir-opt failed
+#   4   llzk-opt failed
 #   77  skip (llzk-opt or lake missing — lit treats as UNRESOLVED/SKIP)
 #
 # Env / flags:
 #   $LLZK_OPT             explicit path to llzk-opt (otherwise discovered on $PATH)
+#   $VEIR_OPT             explicit path to veir-opt (otherwise use
+#                         .lake/build/bin/veir-opt when present, then
+#                         fall back to `lake exec veir-opt`)
 #   $VEIR_DIFF_VERBOSE=1  print intermediate stages to stderr
 #   $VEIR_DIFF_KEEP=1     don't delete intermediate temp files (debug aid)
 #   --allowlist <file>    apply per-test fixed-string substitutions before diffing
+#   --canonicalize        compare `veir-opt -p=felt-combine,dce` with
+#                         `llzk-opt --canonicalize --mlir-print-op-generic`
 #   --lower-first         first pass input through `llzk-opt --mlir-print-op-generic`
 #                         (use when the input is in LLZK custom assembly; default
 #                         assumes input is already in generic MLIR form)
 #
-# See harness/differential.md for the protocol and harness/coverage.md for the
-# per-dialect divergences that the allowlist entries should track.
+# See docs/harness/GATES.md for the current protocol boundary and
+# docs/harness/SOURCES.md for stale historical differential references.
 
 set -euo pipefail
 
 # --- args ---------------------------------------------------------------------
 usage() {
   cat >&2 <<'USAGE'
-usage: llzk-diff.sh <input.mlir> [--allowlist <file>] [--lower-first]
-  Diffs the generic-MLIR round-trip output of veir-opt against
-  `llzk-opt --mlir-print-op-generic` for the same input.
+usage: llzk-diff.sh <input.mlir> [--allowlist <file>] [--canonicalize] [--lower-first]
+  Diffs normalized generic-MLIR output from veir-opt and llzk-opt.
+  Default mode compares parse/print round-trips.
+  --canonicalize compares `veir-opt -p=felt-combine,dce` against
+  `llzk-opt --canonicalize --mlir-print-op-generic`.
 
   $LLZK_OPT or llzk-opt on $PATH selects the LLZK binary.
+  $VEIR_OPT selects the VEIR binary; otherwise .lake/build/bin/veir-opt is
+  used when present, with `lake exec veir-opt` as the fallback.
   $VEIR_DIFF_VERBOSE=1 streams intermediate stages to stderr.
   $VEIR_DIFF_KEEP=1 keeps intermediate temp files after exit.
 USAGE
@@ -36,22 +47,49 @@ USAGE
 }
 
 [[ $# -ge 1 ]] || usage
-INPUT="${1:-}"
-shift || true
-
+INPUT=""
 ALLOWLIST=""
+CANONICALIZE=0
 LOWER_FIRST=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --allowlist) ALLOWLIST="${2:-}"; shift 2 ;;
+    --canonicalize) CANONICALIZE=1; shift ;;
     --lower-first) LOWER_FIRST=1; shift ;;
     -h|--help) usage ;;
-    *) echo "unknown flag: $1" >&2; usage ;;
+    *)
+      if [[ -z "$INPUT" ]]; then
+        INPUT="$1"
+        shift
+      else
+        echo "unexpected extra argument: $1" >&2
+        usage
+      fi
+      ;;
   esac
 done
 
 [[ -n "$INPUT" ]] || usage
 [[ -r "$INPUT" ]] || { echo "input not readable: $INPUT" >&2; exit 2; }
+INPUT_DIR="$(cd "$(dirname "$INPUT")" && pwd)" || {
+  echo "input directory not readable: $(dirname "$INPUT")" >&2
+  exit 2
+}
+INPUT="${INPUT_DIR}/$(basename "$INPUT")"
+
+if [[ -n "$ALLOWLIST" ]]; then
+  ALLOWLIST_DIR="$(cd "$(dirname "$ALLOWLIST")" 2>/dev/null && pwd || true)"
+  if [[ -n "$ALLOWLIST_DIR" ]]; then
+    ALLOWLIST="${ALLOWLIST_DIR}/$(basename "$ALLOWLIST")"
+  fi
+fi
+
+# --- repo root ----------------------------------------------------------------
+# llzk-diff.sh lives in <repo>/scripts/. veir-opt is invoked from <repo> so
+# Lake finds the manifest when the fallback path is needed.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 # --- tool discovery -----------------------------------------------------------
 LLZK_OPT="${LLZK_OPT:-$(command -v llzk-opt 2>/dev/null || true)}"
@@ -59,8 +97,12 @@ if [[ -z "${LLZK_OPT:-}" ]]; then
   echo "SKIP: llzk-opt not found (set \$LLZK_OPT or add to \$PATH)" >&2
   exit 77
 fi
-if ! command -v lake >/dev/null 2>&1; then
-  echo "SKIP: lake not on \$PATH (cannot run veir-opt)" >&2
+VEIR_OPT="${VEIR_OPT:-}"
+if [[ -z "$VEIR_OPT" && -x "${REPO_ROOT}/.lake/build/bin/veir-opt" ]]; then
+  VEIR_OPT="${REPO_ROOT}/.lake/build/bin/veir-opt"
+fi
+if [[ -z "$VEIR_OPT" ]] && ! command -v lake >/dev/null 2>&1; then
+  echo "SKIP: neither \$VEIR_OPT nor lake is available (cannot run veir-opt)" >&2
   exit 77
 fi
 
@@ -82,13 +124,6 @@ VEIR_NORM="$TMPDIR_LOCAL/veir.norm.mlir"
 LLZK_NORM="$TMPDIR_LOCAL/llzk.norm.mlir"
 DIFF_OUT="$TMPDIR_LOCAL/diff.txt"
 
-# --- repo root ----------------------------------------------------------------
-# llzk-diff.sh lives in <repo>/scripts/. veir-opt is invoked from <repo> so
-# lake finds the manifest.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$REPO_ROOT"
-
 log() {
   # Don't use `[[ ... ]] && echo` here — that yields non-zero when verbose
   # is off, which under `set -e` aborts the whole script.
@@ -103,7 +138,7 @@ if [[ "$LOWER_FIRST" -eq 1 ]]; then
   if ! "$LLZK_OPT" --mlir-print-op-generic "$INPUT" > "$GENERIC" 2>"$TMPDIR_LOCAL/llzk-lower.err"; then
     echo "FAIL: llzk-opt could not lower input" >&2
     cat "$TMPDIR_LOCAL/llzk-lower.err" >&2
-    exit 1
+    exit 4
   fi
 else
   log "stage 1: skipped (--lower-first not set; assuming input is generic)"
@@ -111,16 +146,33 @@ else
 fi
 
 # --- stage 2: round-trip through both -----------------------------------------
-log "stage 2: round-trip through veir-opt and llzk-opt"
-if ! lake exec veir-opt "$GENERIC" > "$VEIR_OUT" 2>"$TMPDIR_LOCAL/veir.err"; then
+if [[ "$CANONICALIZE" -eq 1 ]]; then
+  log "stage 2: canonicalize through veir-opt -p=felt-combine,dce and llzk-opt --canonicalize"
+  if [[ -n "$VEIR_OPT" ]]; then
+    VEIR_CMD=("$VEIR_OPT" -p=felt-combine,dce "$GENERIC")
+  else
+    VEIR_CMD=(lake exec veir-opt -p=felt-combine,dce "$GENERIC")
+  fi
+  LLZK_CMD=("$LLZK_OPT" --canonicalize --mlir-print-op-generic "$GENERIC")
+else
+  log "stage 2: round-trip through veir-opt and llzk-opt"
+  if [[ -n "$VEIR_OPT" ]]; then
+    VEIR_CMD=("$VEIR_OPT" "$GENERIC")
+  else
+    VEIR_CMD=(lake exec veir-opt "$GENERIC")
+  fi
+  LLZK_CMD=("$LLZK_OPT" --mlir-print-op-generic "$GENERIC")
+fi
+
+if ! "${VEIR_CMD[@]}" > "$VEIR_OUT" 2>"$TMPDIR_LOCAL/veir.err"; then
   echo "FAIL: veir-opt failed on input" >&2
   cat "$TMPDIR_LOCAL/veir.err" >&2
-  exit 1
+  exit 3
 fi
-if ! "$LLZK_OPT" --mlir-print-op-generic "$GENERIC" > "$LLZK_OUT" 2>"$TMPDIR_LOCAL/llzk.err"; then
+if ! "${LLZK_CMD[@]}" > "$LLZK_OUT" 2>"$TMPDIR_LOCAL/llzk.err"; then
   echo "FAIL: llzk-opt failed on input" >&2
   cat "$TMPDIR_LOCAL/llzk.err" >&2
-  exit 1
+  exit 4
 fi
 
 # --- stage 3: normalize -------------------------------------------------------
@@ -324,7 +376,7 @@ else
   cat "$DIFF_OUT" >&2
   if [[ -n "$ALLOWLIST" ]]; then
     echo >&2
-    echo "Hint: documented divergences belong in $ALLOWLIST; see harness/differential.md §4." >&2
+    echo "Hint: documented divergences belong in $ALLOWLIST; see docs/harness/GATES.md." >&2
   fi
   exit 1
 fi

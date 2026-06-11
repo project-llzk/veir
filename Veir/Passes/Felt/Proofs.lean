@@ -4,11 +4,12 @@ import Veir.Data.Felt.Basic
   Soundness proofs for `Veir/Passes/Felt/Combine.lean`.
 
   Each pattern in `Combine.lean` is paired with an algebraic identity
-  here. The pattern matches the syntactic shape; this file proves the
-  semantic equivalence. The pass-side `sorry`s on rewriter preconditions
-  are consistent with current VEIR practice (see `harness/coverage.md`
-  §Verification machinery); the bar this file clears is the semantic
-  theorem, not the precondition discharge.
+  here, proven over `Felt p := ZMod p`. This file proves the *arithmetic
+  identity only*; it does NOT prove that the IR rewrite preserves program
+  semantics or well-formedness. The pass-side rewriter preconditions are
+  discharged with `sorry` in `Combine.lean`, so the bar this file clears
+  is the algebraic theorem, not the transformation. See `REVIEW.md`
+  (finding VC2) for the full trust-boundary writeup.
 
   Phase E.5 (2026-05-19) upgraded the proof model from `abbrev Felt
   := Int` to `abbrev Felt p := ZMod p`. Each theorem now universally
@@ -34,7 +35,9 @@ theorem right_identity_zero_add (p : Nat) (lhs : Felt p) :
   Soundness of `constant_fold_add` in `Veir/Passes/Felt/Combine.lean`.
 
   The Mathlib coercion `Int → ZMod p` is a ring homomorphism, so
-  `↑c1 + ↑c2 = ↑(c1 + c2)` in `ZMod p`.
+  `↑c1 + ↑c2 = ↑(c1 + c2)` in `ZMod p`. The executable pass may print a
+  registered field's canonical reduced representative; that is the same
+  `ZMod p` value as `c1 + c2`.
 -/
 theorem constant_fold_add (p : Nat) (c1 c2 : Int) :
     add (const p c1) (const p c2) = const p (c1 + c2) := by
@@ -81,21 +84,24 @@ theorem right_zero_mul (p : Nat) (x : Felt p) :
   show x * ((0 : Int) : ZMod p) = ((0 : Int) : ZMod p)
   simp
 
-/-- `felt.sub (felt.const c1) (felt.const c2) = felt.const (c1 - c2)`. -/
+/-- `felt.sub (felt.const c1) (felt.const c2) = felt.const (c1 - c2)`.
+    Registered-field execution may print the canonical reduced representative. -/
 theorem constant_fold_sub (p : Nat) (c1 c2 : Int) :
     sub (const p c1) (const p c2) = const p (c1 - c2) := by
   show ((c1 : ZMod p) - (c2 : ZMod p)) = ((c1 - c2 : Int) : ZMod p)
   push_cast
   ring
 
-/-- `felt.mul (felt.const c1) (felt.const c2) = felt.const (c1 * c2)`. -/
+/-- `felt.mul (felt.const c1) (felt.const c2) = felt.const (c1 * c2)`.
+    Registered-field execution may print the canonical reduced representative. -/
 theorem constant_fold_mul (p : Nat) (c1 c2 : Int) :
     mul (const p c1) (const p c2) = const p (c1 * c2) := by
   show ((c1 : ZMod p) * (c2 : ZMod p)) = ((c1 * c2 : Int) : ZMod p)
   push_cast
   ring
 
-/-- `felt.neg (felt.const c) = felt.const (-c)`. -/
+/-- `felt.neg (felt.const c) = felt.const (-c)`.
+    Registered-field execution may print the canonical reduced representative. -/
 theorem constant_fold_neg (p : Nat) (c : Int) :
     neg (const p c) = const p (-c) := by
   show -((c : Int) : ZMod p) = ((-c : Int) : ZMod p)
