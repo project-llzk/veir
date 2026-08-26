@@ -1,7 +1,7 @@
 module
 
 public import Veir.IR.Attribute
-public import Veir.Properties
+public import Veir.IR.OpInfo
 
 namespace Veir
 

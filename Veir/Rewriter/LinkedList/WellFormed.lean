@@ -1,13 +1,9 @@
 module
 
-public import Veir.IR
 public import Veir.Rewriter.InsertPoint
 public import Veir.Rewriter.LinkedList.Basic
 
 import Veir.Rewriter.LinkedList.GetSet
-import Veir.IR.WellFormed
-import Std.Data.HashSet
-import Std.Data.ExtHashSet
 
 public section
 
@@ -203,7 +199,8 @@ theorem ValuePtr.DefUse.getElem?_zero_erase_array_eq
     (hWF : ValuePtr.DefUse value ctx array missingUses) (useInArray: use ∈ array)
     {i} (iInBounds : i < (array.erase use).size) :
     (array.erase use)[0]? = value.getFirstUse! (use.removeFromCurrent ctx useInBounds ctxInBounds) := by
-  grind [Array.getElem_of_mem, ValuePtr.DefUse, ValuePtr.DefUse.erase_getElem_array_eq_eraseIdx]
+  grind [Array.getElem_of_mem, ValuePtr.DefUse, ValuePtr.DefUse.erase_getElem_array_eq_eraseIdx,
+    ValuePtr.DefUse_array_injective, Array.getElem?_eraseIdx_of_ge]
 
 theorem ValuePtr.defUse_removeFromCurrent_self
     {value : ValuePtr} (hvalue : use ∈ array)
@@ -527,7 +524,8 @@ theorem BlockPtr.DefUse.getElem?_zero_erase_array_eq
     (hWF : BlockPtr.DefUse block ctx array missingUses) (useInArray: use ∈ array)
     {i} (iInBounds : i < (array.erase use).size) :
     (array.erase use)[0]? = (block.get! (use.removeFromCurrent ctx useInBounds ctxInBounds)).firstUse := by
-  grind [Array.getElem_of_mem, BlockPtr.DefUse, BlockPtr.DefUse.erase_getElem_array_eq_eraseIdx]
+  grind [Array.getElem_of_mem, BlockPtr.DefUse, BlockPtr.DefUse.erase_getElem_array_eq_eraseIdx,
+    BlockPtr.DefUse_array_injective, Array.getElem?_eraseIdx_of_ge]
 
 theorem BlockPtr.defUse_removeFromCurrent_self
     {block : BlockPtr} {hvalue : use ∈ array}

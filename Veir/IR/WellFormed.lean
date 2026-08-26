@@ -1,12 +1,9 @@
 module
 
-public import Veir.IR.Basic
 public import Veir.IR.Fields
 import Veir.IR.GetSet
 import Veir.IR.InBounds
 import Veir.IR.Grind
-import Veir.ForLean
-import Std.Data.ExtHashSet
 
 public section
 
@@ -14,7 +11,7 @@ namespace Veir
 
 open ForLean
 
-variable {OpInfo} [HasOpInfo OpInfo]
+variable {OpInfo} [IsOpCode OpInfo]
 variable {ctx ctx' : IRContext OpInfo}
 
 /--
@@ -710,7 +707,7 @@ structure IRContext.WellFormed (ctx : IRContext OpInfo)
 attribute [grind →] IRContext.WellFormed.inBounds
 
 @[grind .]
-theorem IRContext.empty_wellFormed [HasOpInfo opInfo] :
+theorem IRContext.empty_wellFormed [IsOpCode opInfo] :
     (IRContext.empty opInfo).WellFormed := by
   grind [IRContext.WellFormed]
 
@@ -1432,11 +1429,11 @@ theorem OperationPtr.WellFormed.region_parent.unchanged
   This is the type that users are expected to work with most of the time, unless they
   need to explicitly break the well-formedness invariant during a transformation.
 -/
-structure WfIRContext (OpInfo : Type) [HasOpInfo OpInfo] where
+structure WfIRContext (OpInfo : Type) [IsOpCode OpInfo] where
   raw : IRContext OpInfo
   wellFormed : raw.WellFormed
 
-public instance {OpInfo} [HasOpInfo OpInfo] :
+public instance {OpInfo} [IsOpCode OpInfo] :
     Coe (WfIRContext OpInfo) (IRContext OpInfo) where
   coe wfCtx := wfCtx.raw
 
@@ -1445,7 +1442,7 @@ theorem WfIRContext_raw_wellFormed (wfCtx : WfIRContext OpInfo) :
     (wfCtx.raw).WellFormed := by
   grind [WfIRContext]
 
-instance instWfIRContextInhabited {OpInfo} [HasOpInfo OpInfo] :
+instance instWfIRContextInhabited {OpInfo} [IsOpCode OpInfo] :
     Inhabited (WfIRContext OpInfo) where
   default := ⟨IRContext.empty OpInfo, IRContext.empty_wellFormed⟩
 

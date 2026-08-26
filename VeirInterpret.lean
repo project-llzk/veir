@@ -1,8 +1,7 @@
 import Veir.Parser.MlirParser
-import Veir.Printer
-import Veir.IR.Basic
 import Veir.Verifier
 import Veir.Interpreter.Basic
+import Veir.Panic
 
 /-!
   # Veir Interpreter CLI Tool
@@ -23,7 +22,7 @@ def parseOperation (filename : String) : ExceptT String IO (WfIRContext OpCode �
   match ParserState.fromInput fileContent with
   | .ok parser =>
     let parserState := MlirParserState.fromContext ctx (allowUnregisteredDialect := true)
-    match (parseOp none).run parserState parser with
+    match parseTopLevelOp.run parserState parser with
     | .ok (op, state, _) =>
       return (state.ctx, op)
     | .error errMsg =>
@@ -33,28 +32,12 @@ def parseOperation (filename : String) : ExceptT String IO (WfIRContext OpCode �
 
 /-- Returns true if `op` is a viable zero-argument `@main` function. -/
 private def isZeroArgMainFunc (ctx : IRContext OpCode) (op : OperationPtr) : Bool :=
-  let opType := op.getOpType! ctx
-  let check : (opCode : OpCode) → propertiesOf opCode → Bool
-    | .llvm .func, props =>
-      if let some symName := props.sym_name then
-        String.fromUTF8! symName.value == "main" &&
-        match props.function_type with
-        | some ft =>
-          match ft.val with
-          | .llvmFunctionType funcType => funcType.inputs.isEmpty
-          | _ => false
-        | none => false
-      else false
-    | .func .func, props =>
-      if let some symName := props.sym_name then
-        String.fromUTF8! symName.value == "main" &&
-        let region := op.getRegion! ctx 0
-        match (region.get! ctx).firstBlock with
-        | some block => block.getNumArguments! ctx == 0
-        | none => false
-      else false
-    | _, _ => false
-  check opType (op.getProperties! ctx opType)
+  match FunctionOpInterface.getSymName? op ctx with
+  | some symName =>
+      String.fromUTF8! symName.value == "main" &&
+        (FunctionOpInterface.getNumArguments? op ctx == some 0)
+  | none =>
+      false
 
 /-- Scan the module's top-level ops for entry points. -/
 partial def scanEntryPoints (ctx : IRContext OpCode) (op : Option OperationPtr)
@@ -62,16 +45,16 @@ partial def scanEntryPoints (ctx : IRContext OpCode) (op : Option OperationPtr)
   match op with
   | none => return entryPoints
   | some op =>
-    let opType := op.getOpType! ctx
-    match opType with
-    | .llvm .func | .func .func =>
+    if op.isFunctionLike ctx then
       let entryPoints := if isZeroArgMainFunc ctx op then op :: entryPoints else entryPoints
       scanEntryPoints ctx (op.get! ctx).next entryPoints
-    | .llvm .module_flags =>
-      scanEntryPoints ctx (op.get! ctx).next entryPoints
-    | _ =>
-      IO.eprintln "Error: Top-level operations are disallowed; define a zero-argument function named 'main'"
-      IO.Process.exit 1
+    else
+      match op.getOpType! ctx with
+      | .llvm .module_flags | .llvm .mlir__global =>
+        scanEntryPoints ctx (op.get! ctx).next entryPoints
+      | _ =>
+        IO.eprintln "Error: unsupported top-level operation; expected a function, llvm.mlir.global, or llvm.module_flags"
+        IO.Process.exit 1
 
 /-- Resolve the unique entry point of the module, if one exists. -/
 def resolveEntryPoint (ctx : IRContext OpCode) (moduleOp : OperationPtr) : IO OperationPtr := do
@@ -91,20 +74,21 @@ def resolveEntryPoint (ctx : IRContext OpCode) (moduleOp : OperationPtr) : IO Op
 
 set_option warn.sorry false in
 def main (args : List String) : IO Unit := do
+  enableExitOnPanic
   match args with
   | [filename] =>
     match ← parseOperation filename with
     | .ok (ctx, op) =>
-      match ctx.verify with
+      match ctx.verify op with
       | .ok _ =>
         let rawCtx : IRContext OpCode := ctx
         let mainOp ← resolveEntryPoint rawCtx op
         let result := bind (interpretFunction (ctx := ctx) mainOp #[] MemoryState.empty (by sorry))
                            (fun (_, r) => pure r)
         match result with
-        | some (.ok results) => IO.println s!"Program output: {results}"
-        | some .ub => IO.println "Undefined behavior"
-        | none =>
+        | .ok results => IO.println s!"Program output: {results}"
+        | .ub => IO.println "Undefined behavior"
+        | .fail =>
           IO.eprintln "Error while interpreting module"
           IO.Process.exit 1
       | .error errMsg =>

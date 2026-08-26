@@ -20,7 +20,7 @@ and on how much of VEIR we can trust as the substrate.
 - **`WfIRContext.Dom` is an AXIOM.** VEIR axiomatizes SSA dominance
   (`Veir/Dominance.lean`); the dominance lemmas (e.g.
   `IRContext.Dom.value_not_in_results_of_forall_in_operands_of_dominates`,
-  `OperationPtr.strictlyDominates_of_getDefiningOp!_of_mem_getOperands!`) are
+  `OperationPtr.properlyDominates_of_definingOp?_of_mem_getOperands!`) are
   built on it. This is a **first-class trust-base item**: any rewrite proof
   that uses dominance depends on this axiom unless it is discharged by runtime
   guards (as we did for the Felt patterns). A full audit should enumerate

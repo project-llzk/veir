@@ -121,6 +121,21 @@ theorem matchConst_inBounds {op : OperationPtr} {ctx : IRContext OpCode}
   simp only [bind, Option.bind] at h
   split at h <;> first | exact matchOp_inBounds_const (by assumption) | simp_all
 
+/-- The context after `PatternRewriter.replaceValue` is exactly the one
+    `WfRewriter.replaceValue` produces: the worklist bookkeeping
+    (`addUsersInWorklist`) leaves `ctx` untouched. Upstream's
+    `addUsersInWorklist_same_ctx` is `private` but carries `@[grind =]`, so
+    `grind` discharges this without naming it. -/
+@[simp]
+theorem ctx_replaceValue
+    (rewriter : PatternRewriter OpCode) (oldVal newVal : ValuePtr)
+    (hNe : oldVal ≠ newVal)
+    (oldIn : oldVal.InBounds rewriter.ctx.raw) (newIn : newVal.InBounds rewriter.ctx.raw) :
+    (rewriter.replaceValue oldVal newVal hNe oldIn newIn).ctx =
+      WfRewriter.replaceValue rewriter.ctx oldVal newVal hNe oldIn newIn := by
+  unfold PatternRewriter.replaceValue
+  grind
+
 /-- `replaceValue` preserves an operation's region count. -/
 theorem getNumRegions!_replaceValue
     (rewriter : PatternRewriter OpCode) (oldVal newVal : ValuePtr) (op : OperationPtr)
@@ -128,8 +143,8 @@ theorem getNumRegions!_replaceValue
     (oldIn : oldVal.InBounds rewriter.ctx.raw) (newIn : newVal.InBounds rewriter.ctx.raw)
     : op.getNumRegions! (rewriter.replaceValue oldVal newVal hNe oldIn newIn).ctx.raw =
       op.getNumRegions! rewriter.ctx.raw := by
-  unfold PatternRewriter.replaceValue
-  simp [PatternRewriter.addUsersInWorklist_same_ctx]
+  rw [ctx_replaceValue]
+  simp
 
 /-- `replaceValue` preserves `InBounds` of an operation. -/
 theorem inBounds_replaceValue
@@ -138,8 +153,7 @@ theorem inBounds_replaceValue
     (oldIn : oldVal.InBounds rewriter.ctx.raw) (newIn : newVal.InBounds rewriter.ctx.raw)
     (hOp : op.InBounds rewriter.ctx.raw) :
     op.InBounds (rewriter.replaceValue oldVal newVal hNe oldIn newIn).ctx.raw := by
-  unfold PatternRewriter.replaceValue
-  simp only [PatternRewriter.addUsersInWorklist_same_ctx]
+  rw [ctx_replaceValue]
   have hGeneric :
       (GenericPtr.operation op).InBounds
         (WfRewriter.replaceValue rewriter.ctx oldVal newVal hNe oldIn newIn).raw := by
@@ -154,8 +168,8 @@ theorem getNumResults!_replaceValue
     (oldIn : oldVal.InBounds rewriter.ctx.raw) (newIn : newVal.InBounds rewriter.ctx.raw)
     : op.getNumResults! (rewriter.replaceValue oldVal newVal hNe oldIn newIn).ctx.raw =
       op.getNumResults! rewriter.ctx.raw := by
-  unfold PatternRewriter.replaceValue
-  simp [PatternRewriter.addUsersInWorklist_same_ctx]
+  rw [ctx_replaceValue]
+  simp
 
 /-- Replacing all uses of `oldVal` by a distinct `newVal` leaves `oldVal` use-free. -/
 theorem hasUses!_oldVal_WfRewriter_replaceValue
@@ -172,9 +186,8 @@ theorem hasUses!_oldVal_replaceValue
     (oldIn : oldVal.InBounds rewriter.ctx.raw) (newIn : newVal.InBounds rewriter.ctx.raw)
     (hNe : oldVal ≠ newVal) :
     oldVal.hasUses! (rewriter.replaceValue oldVal newVal hNe oldIn newIn).ctx.raw = false := by
-  unfold PatternRewriter.replaceValue
-  simp [PatternRewriter.addUsersInWorklist_same_ctx,
-    hasUses!_oldVal_WfRewriter_replaceValue]
+  rw [ctx_replaceValue]
+  simp [hasUses!_oldVal_WfRewriter_replaceValue]
 
 /-- `felt.add x (felt.const 0) → x`, fully sorry-free. The two defensive guards
     (`hRegNe`, `hEq`) supply the only two facts `WfIRContext` does not carry —
@@ -182,12 +195,15 @@ theorem hasUses!_oldVal_replaceValue
     `eraseOp` preconditions discharge WITHOUT VEIR's `WfIRContext.Dom` axiom. The
     guards are sound: they only skip the rewrite in degenerate states impossible
     in well-formed IR. -/
-def right_identity_zero_add (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def right_identity_zero_add (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchAdd op rewriter.ctx with
   | none => return rewriter
   | some (lhs, _rhs, _) =>
-    let some rhsOp := _rhs.getDefiningOp! rewriter.ctx.raw | return rewriter
+    let some rhsOp := _rhs.definingOp? | return rewriter
     let some cst := matchConst rhsOp rewriter.ctx | return rewriter
     if cst.value.value ≠ 0 then return rewriter
     -- Defensive guards for the two facts WfIRContext does not carry.
@@ -417,7 +433,10 @@ theorem parent_createOp
     defensive runtime guards supplying the only facts `WfIRContext` does not carry: `op`'s region
     count being `0` and `op` having a parent block. The guards are sound: they only skip the
     rewrite in degenerate states impossible for a well-formed matched `felt.add`. -/
-def constant_fold_add (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def constant_fold_add (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match hm : matchAdd op rewriter.ctx with
   | none => return rewriter
@@ -640,12 +659,15 @@ def replaceWithNewOp (rewriter : PatternRewriter OpCode) (op : OperationPtr) (op
     rewriter'.replaceOp op newOp hOpNe hPar' hReg0' hOpIn' hNewIn'
 
 /-- felt.mul x (felt.const 1) → x.  Soundness: `right_identity_one_mul`. -/
-def right_identity_one_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def right_identity_one_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchMul op rewriter.ctx with
   | none => return rewriter
   | some (lhs, rhs, _) =>
-    let some rhsOp := rhs.getDefiningOp! rewriter.ctx.raw | return rewriter
+    let some rhsOp := rhs.definingOp? | return rewriter
     let some cst := matchConst rhsOp rewriter.ctx | return rewriter
     if cst.value.value ≠ 1 then return rewriter
     if hRegNe : op.getNumRegions! rewriter.ctx.raw ≠ 0 then return rewriter else
@@ -661,7 +683,10 @@ def right_identity_one_mul (rewriter : PatternRewriter OpCode) (op : OperationPt
     projectToOperand rewriter op lhs hIn hReg0 hNumRes hEq hResIn hLhsIn
 
 /-- felt.sub (felt.const c1) (felt.const c2) → felt.const (c1-c2). -/
-def constant_fold_sub (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def constant_fold_sub (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchSub op rewriter.ctx with
   | none => return rewriter
@@ -681,7 +706,10 @@ def constant_fold_sub (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
       hIn hReg0 hParSome (by simp)
 
 /-- felt.mul (felt.const c1) (felt.const c2) → felt.const (c1*c2). -/
-def constant_fold_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def constant_fold_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchMul op rewriter.ctx with
   | none => return rewriter
@@ -701,7 +729,10 @@ def constant_fold_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
       hIn hReg0 hParSome (by simp)
 
 /-- felt.neg (felt.const c) → felt.const (-c). -/
-def constant_fold_neg (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def constant_fold_neg (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchNeg op rewriter.ctx with
   | none => return rewriter
@@ -719,7 +750,10 @@ def constant_fold_neg (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
       hIn hReg0 hParSome (by simp)
 
 /-- felt.sub x x → felt.const 0. -/
-def self_subtraction_to_zero (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def self_subtraction_to_zero (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchSub op rewriter.ctx with
   | none => return rewriter
@@ -737,12 +771,15 @@ def self_subtraction_to_zero (rewriter : PatternRewriter OpCode) (op : Operation
       hIn hReg0 hParSome (by simp)
 
 /-- felt.mul x (felt.const 0) → felt.const 0.  Soundness: `right_zero_mul`. -/
-def right_zero_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def right_zero_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchMul op rewriter.ctx with
   | none => return rewriter
   | some (lhs, rhs, _) =>
-    let some rhsOp := rhs.getDefiningOp! rewriter.ctx.raw | return rewriter
+    let some rhsOp := rhs.definingOp? | return rewriter
     let some cst := matchConst rhsOp rewriter.ctx | return rewriter
     if cst.value.value ≠ 0 then return rewriter
     let resultType := lhs.getType! rewriter.ctx.raw
@@ -757,7 +794,10 @@ def right_zero_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
       hIn hReg0 hParSome (by simp)
 
 /-- felt.add x (felt.neg x) → felt.const 0.  Soundness: `add_neg_to_zero`. -/
-def add_neg_to_zero (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def add_neg_to_zero (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchAdd op rewriter.ctx with
   | none => return rewriter
@@ -776,7 +816,10 @@ def add_neg_to_zero (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
       hIn hReg0 hParSome (by simp)
 
 /-- felt.add (felt.const c) x → felt.add x (felt.const c).  Soundness: `add_const_swap`. -/
-def add_const_swap (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def add_const_swap (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchAdd op rewriter.ctx with
   | none => return rewriter
@@ -805,7 +848,10 @@ def add_const_swap (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
         · exact hLhsIn)
 
 /-- felt.neg (felt.neg x) → x.  Soundness: `neg_neg_to_self`. -/
-def neg_neg_to_self (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def neg_neg_to_self (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchNeg op rewriter.ctx with
   | none => return rewriter
@@ -824,7 +870,10 @@ def neg_neg_to_self (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
       projectToOperand rewriter op inner hIn hReg0 hNumRes hEq hResIn hInnerIn
 
 /-- felt.sub (felt.add x c) c → x.  Soundness: `add_sub_const_cancel`. -/
-def add_sub_const_cancel (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def add_sub_const_cancel (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchSub op rewriter.ctx with
   | none => return rewriter
@@ -846,7 +895,10 @@ def add_sub_const_cancel (rewriter : PatternRewriter OpCode) (op : OperationPtr)
       projectToOperand rewriter op x hIn hReg0 hNumRes hEq hResIn hXIn
 
 /-- felt.add (felt.sub x c) c → x.  Soundness: `sub_add_const_cancel`. -/
-def sub_add_const_cancel (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def sub_add_const_cancel (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchAdd op rewriter.ctx with
   | none => return rewriter
@@ -959,7 +1011,10 @@ def replaceWithBinOpOfConst (rewriter : PatternRewriter OpCode) (op : OperationP
         · exact hConstResIn1)
 
 /-- felt.add (felt.add x c1) c2 → felt.add x (c1+c2). -/
-def assoc_const_fold_add (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def assoc_const_fold_add (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchAdd op rewriter.ctx with
   | none => return rewriter
@@ -984,7 +1039,10 @@ def assoc_const_fold_add (rewriter : PatternRewriter OpCode) (op : OperationPtr)
         hIn hReg0 hParSome hxIn
 
 /-- felt.mul (felt.mul x c1) c2 → felt.mul x (c1*c2). -/
-def assoc_const_fold_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr) :
+def assoc_const_fold_mul (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    -- Upstream `RewritePattern` supplies the match's in-bounds proof; this
+    -- pattern re-establishes what it needs itself, so it is not used here.
+    (_opInBounds : op.InBounds rewriter.ctx.raw) :
     Option (PatternRewriter OpCode) := do
   match h : matchMul op rewriter.ctx with
   | none => return rewriter

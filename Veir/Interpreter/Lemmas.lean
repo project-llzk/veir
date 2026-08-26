@@ -1,14 +1,34 @@
-import Veir.Interpreter.Basic
-import Veir.Dominance
-import Veir.Interpreter.Refinement.Basic
+module
+
+public import Veir.Verifier
+public import Veir.Interpreter.Refinement.Basic
+
+import all Veir.Interpreter.Basic
 
 namespace Veir
+public section
 
 variable {OpInfo : Type} [HasOpInfo OpInfo]
-variable {ctx : WfIRContext OpInfo}
+variable {ctx ctx' : WfIRContext OpInfo}
 variable {varState varState' : VariableState ctx}
 variable {state state' : InterpreterState ctx}
 variable {op op' : OperationPtr}
+
+/-- The value stored for `var` conforms to `var`'s type. -/
+theorem VariableState.getVar?_conforms {ctx : WfIRContext OpInfo} {state : VariableState ctx}
+    {var : ValuePtr} {val : RuntimeValue} (h : state.getVar? var = some val) :
+    val.Conforms (var.getType! ctx.raw) := by
+  grind [VariableState.getVar?, state.conforms var val]
+
+/-- The operand values gathered by `getOperandValues` conform to `op`'s declared operand types. -/
+theorem VariableState.getOperandValues_conforms
+    (h : varState.getOperandValues op = some values) :
+    RuntimeValue.ArrayConforms values (op.getOperandTypes! ctx.raw) := by
+  simp only [VariableState.getOperandValues] at h
+  simp only [RuntimeValue.ArrayConforms]
+  constructor; grind
+  intro i hi
+  grind [VariableState.getVar?_conforms, Array.mapM_option_eq_some_implies h i (by grind)]
 
 @[grind =]
 theorem VariableState.setVar?_eq_some_setVar (h : val.Conforms (var.getType! ctx.raw)) :
@@ -133,6 +153,19 @@ theorem VariableState.getVar?_setResultValues?_of_notMem_getResults! {value resu
 grind_pattern VariableState.getVar?_setResultValues?_of_notMem_getResults! =>
   op.getResults! ctx, varState.setResultValues? op resultValues, varState'.getVar? value
 
+/-- `op` operation results are exactly the values set by `setResultValues? op` in the new state. -/
+theorem VariableState.getVar?_getResult_of_setResultValues? :
+    i < op.getNumResults! ctx.raw →
+    varState.setResultValues? op resultValues inBounds = some varState' →
+    varState'.getVar? (op.getResult i) = resultValues[i]! := by
+  intro hNotMemResults hSetResults
+  simp only [VariableState.getVar?_setResultValues? hSetResults]
+  grind
+
+grind_pattern VariableState.getVar?_getResult_of_setResultValues? =>
+  i < op.getNumResults! ctx.raw, varState.setResultValues? op resultValues,
+  varState'.getVar? (op.getResult i)
+
 @[grind =>]
 theorem VariableState.getVar?_setResultValues?_of_value_inBounds
     (valueInBounds : value.InBounds ctx.raw) :
@@ -150,16 +183,148 @@ theorem VariableState.getVar?_setResultValues?_of_value_inBounds
   simp only [getVar?_setResultValues? h]
   cases value <;> grind
 
+theorem VariableState.getVar?_setArgumentValues?_loop {block : BlockPtr}
+    {values : Array RuntimeValue} {i : Nat} {iInBounds blockInBounds} :
+    VariableState.setArgumentValues?_loop varState block values i blockInBounds iInBounds = some varState' →
+    varState'.getVar? value =
+    match value with
+    | .blockArgument ⟨block', index⟩ =>
+      if block' = block ∧ index < i then
+        some values[index]!
+      else
+        varState.getVar? value
+    | _ =>
+      varState.getVar? value := by
+  fun_induction VariableState.setArgumentValues?_loop
+  next => grind
+  next =>
+    simp only [Option.bind_eq_bind, Nat.succ_eq_add_one, Option.bind]
+    grind [cases BlockArgumentPtr, OperationPtr.getResult_def, cases ValuePtr]
+
+@[grind =>]
+theorem VariableState.getVar?_setArgumentValues? {block : BlockPtr} {values : Array RuntimeValue}
+    {blockInBounds} :
+    varState.setArgumentValues? block values blockInBounds = some varState' →
+    varState'.getVar? value =
+    match value with
+    | .blockArgument ⟨block', index⟩ =>
+      if block' = block ∧ index < block.getNumArguments! ctx.raw then
+        some values[index]!
+      else
+        varState.getVar? value
+    | _ =>
+      varState.getVar? value := by
+  grind [VariableState.setArgumentValues?, VariableState.getVar?_setArgumentValues?_loop]
+
+theorem VariableState.getVar?_setArgumentValues?_of_notMem_getArguments!
+    {block : BlockPtr} {value values blockInBounds} :
+    value ∉ block.getArguments! ctx.raw →
+    varState.setArgumentValues? block values blockInBounds = some varState' →
+    varState'.getVar? value = varState.getVar? value := by
+  intro hNotMem hSet
+  simp only [VariableState.getVar?_setArgumentValues? hSet]
+  rcases value with _ | ⟨block', index⟩
+  · grind
+  · simp only [BlockPtr.getArguments!.mem_iff_exists_index, not_exists, not_and] at hNotMem
+    grind [BlockPtr.getArgument_def]
+
+/-- `block` arguments are exactly the values set by `setArgumentValues? block` in the new state. -/
+theorem VariableState.getVar?_getArgument_of_setArgumentValues?
+    {block : BlockPtr} {values blockInBounds} :
+    i < block.getNumArguments! ctx.raw →
+    varState.setArgumentValues? block values blockInBounds = some varState' →
+    varState'.getVar? (block.getArgument i) = some values[i]! := by
+  intro hi hSet
+  simp only [VariableState.getVar?_setArgumentValues? hSet]
+  grind [BlockPtr.getArgument_def]
+
+/-- `setArgumentValues?.loop` succeeds iff every argument value it binds conforms to its argument
+type. -/
+theorem VariableState.setArgumentValues?_loop_isSome_iff {block : BlockPtr}
+    {values : Array RuntimeValue} {i : Nat} {iInBounds blockInBounds} :
+    (∀ j, j < i → (values[j]!).Conforms ((block.getArgument j : ValuePtr).getType! ctx.raw)) ↔
+    (∃ v, VariableState.setArgumentValues?_loop varState block values i blockInBounds iInBounds = some v) := by
+  fun_induction VariableState.setArgumentValues?_loop
+  next => grind
+  next varState hin k hk arg value ih =>
+    simp only [Option.bind_eq_bind, Option.bind]
+    constructor
+    · intro hconform
+      rw [VariableState.setVar?_eq_some_setVar (hconform k (by grind))]
+      simp only [← ih]
+      grind
+    · rintro ⟨v, hv⟩ j hj
+      rcases hsv : varState.setVar? (ValuePtr.blockArgument arg) value with _ | varState'
+      · grind
+      · grind [ih varState']
+
+/-- `setArgumentValues?` succeeds iff every argument value conforms to its argument type. -/
+theorem VariableState.setArgumentValues?_isSome_iff_conforms (varState : VariableState ctx)
+    {block : BlockPtr} {values : Array RuntimeValue} {blockInBounds} :
+    (∀ j, j < block.getNumArguments! ctx.raw →
+      (values[j]!).Conforms ((block.getArgument j : ValuePtr).getType! ctx.raw)) ↔
+    (∃ v, varState.setArgumentValues? block values blockInBounds = some v) := by
+  simp only [VariableState.setArgumentValues?]
+  exact VariableState.setArgumentValues?_loop_isSome_iff
+
+/--
+Assert equality between two `interpretOp'` calls that have the same operation type and properties.
+This lemma is useful to avoid introducing extra casts on the `interpretOp'` arguments.
+-/
+theorem interpretOp'_opType_cast
+    (hOpType : opType = opType')
+    (hProps : props = hOpType ▸ props') :
+    interpretOp' opType props resultTypes operands successors mem =
+    interpretOp' opType' props' resultTypes operands successors mem := by
+  subst opType
+  grind
+
 theorem interpretOp_some_iff {ctx : WfIRContext OpCode} {state state' : InterpreterState ctx}
   {inBounds : op.InBounds ctx.raw} :
-  interpretOp op state inBounds = some (.ok (state', cf)) ↔
+  interpretOp op state inBounds = .ok (state', cf) ↔
   ∃ operandValues resValues mem' varState',
     (state.variables.getOperandValues op) = some operandValues ∧
-    interpretOp' (op.getOpType! ctx.raw) (op.getProperties! ctx.raw (op.getOpType! ctx.raw))
-      (op.getResultTypes! ctx.raw) operandValues (op.getSuccessors! ctx.raw) state.memory =
-      some (.ok (resValues, mem', cf)) ∧
+    op.interpret ctx operandValues state.memory = .ok (resValues, mem', cf) ∧
     state.variables.setResultValues? op resValues = some varState' ∧
     state' = ⟨varState', mem'⟩ := by
+  simp only [interpretOp, bind, pure, liftM, monadLift, MonadLift.monadLift]
+  grind
+
+/--
+Given that getting the operands from the interpreter state succeeds, interpreting an operation
+with `interpretOp` returns `ok` iff interpreting the operation with `interpretOp'` returns `ok` and
+setting the result values in the state succeeds.
+-/
+theorem interpretOp_ok_iff_of_getOperandValues_eq_some
+  {ctx : WfIRContext OpCode} {state state' : InterpreterState ctx} {inBounds : op.InBounds ctx.raw}
+  (hoperandValues : state.variables.getOperandValues op = some operandValues) :
+  interpretOp op state inBounds = .ok (state', cf) ↔
+  ∃ resValues,
+    op.interpret ctx operandValues state.memory = .ok (resValues, state'.memory, cf) ∧
+    state.variables.setResultValues? op resValues = some state'.variables := by
+  simp only [interpretOp, hoperandValues, bind, pure, liftM, monadLift, MonadLift.monadLift]
+  grind [cases InterpreterState]
+
+/--
+If interpreting an operation triggers `ub`, then we know that the operands were correctly fetched,
+and that the underlying `interpretOp'` call triggered `ub`.
+-/
+theorem interpretOp_ub_iff {ctx : WfIRContext OpCode} {state : InterpreterState ctx}
+  {inBounds : op.InBounds ctx.raw} :
+  interpretOp op state inBounds = .ub ↔
+  ∃ operandValues,
+    (state.variables.getOperandValues op) = some operandValues ∧
+    op.interpret ctx operandValues state.memory = .ub := by
+  simp only [interpretOp, bind, pure, liftM, monadLift, MonadLift.monadLift]
+  grind
+
+/-- `interpretOp` is `ub` iff `interpretOp'` is `ub` if the operands are correctly fetched from
+the variable state. -/
+theorem interpretOp_ub_iff_op_interpret_of_getOperandValues_eq_some
+  {ctx : WfIRContext OpCode} {state : InterpreterState ctx} {inBounds : op.InBounds ctx.raw}
+  (hoperandValues : state.variables.getOperandValues op = some operandValues) :
+  interpretOp op state inBounds = .ub ↔
+  op.interpret ctx.raw operandValues state.memory = .ub := by
   simp only [interpretOp, bind, pure, liftM, monadLift, MonadLift.monadLift]
   grind
 
@@ -172,6 +337,16 @@ theorem VariableState.getOperandValues_eq_of_getVar?_eq :
                l.mapM varState.getVar? = l.mapM varState'.getVar? by grind
   intro l hl
   induction l <;> grind
+
+/-- Getting `op` operands from the variable state returns an `array` of values iff `array` has
+the same size as the number of operands, and each operand value maps to the `array` elements. -/
+theorem VariableState.getOperandValues_eq_some_iff :
+    (varState.getOperandValues op = some array ↔
+    op.getNumOperands! ctx.raw = array.size ∧
+    (∀ i, i < op.getNumOperands! ctx.raw →
+      varState.getVar? (op.getOperand! ctx.raw i) = some array[i]!)) := by
+  simp only [VariableState.getOperandValues]
+  grind [Array.mapM_eq_some_iff_of_size_eq]
 
 @[grind →]
 theorem VariableState.setResultValues?.getNumRseults!_eq_size :
@@ -194,8 +369,50 @@ theorem VariableState.setResultValues?_comm
   ext val value
   cases val <;> grind [getVar?_setResultValues?]
 
+/-- Success of `setArgumentValues?` only depends on the values conforming to the argument types,
+not on the contents of the variable state, so it can be transferred to any other state. -/
+theorem VariableState.setArgumentValues?_eq_some_of_varState
+    (varState₂ : VariableState ctx) :
+    varState.setArgumentValues? block values blockInBounds = some varState' →
+    ∃ varState₂', varState₂.setArgumentValues? block values blockInBounds = some varState₂' := by
+  intro h
+  simp only [← VariableState.setArgumentValues?_isSome_iff_conforms]
+  grind [(VariableState.setArgumentValues?_isSome_iff_conforms varState).mpr ⟨_, h⟩]
+
+/-- Setting block arguments and operation results commute: block arguments and operation results
+are distinct `ValuePtr`s, so they never alias. -/
+theorem VariableState.setArgumentValues?_setResultValues?_comm :
+    varState.setArgumentValues? block argValues blockInBounds = some varState' →
+    varState'.setResultValues? op resValues opInBounds = some varState'' →
+    ∃ varState₂, varState.setResultValues? op resValues opInBounds = some varState₂ ∧
+    varState₂.setArgumentValues? block argValues blockInBounds = some varState'' := by
+  intros h₁ h₂
+  have ⟨varState₂, hvs₂⟩ := setResultValues?_eq_some_of_varState varState h₂
+  have ⟨varState₂', hvs₂'⟩ := setArgumentValues?_eq_some_of_varState varState₂ h₁
+  exists varState₂
+  constructor; grind
+  simp only [hvs₂', Option.some.injEq]
+  ext val value
+  grind [getVar?_setResultValues?, getVar?_setArgumentValues?]
+
+/-- Setting operation results and block arguments commute: block arguments and operation results
+are distinct `ValuePtr`s, so they never alias. -/
+theorem VariableState.setResultValues?_setArgumentValues?_comm :
+    varState.setResultValues? op resValues opInBounds = some varState' →
+    varState'.setArgumentValues? block argValues blockInBounds = some varState'' →
+    ∃ varState₂, varState.setArgumentValues? block argValues blockInBounds = some varState₂ ∧
+    varState₂.setResultValues? op resValues opInBounds = some varState'' := by
+  intros h₁ h₂
+  have ⟨varState₂, hvs₂⟩ := setArgumentValues?_eq_some_of_varState varState h₂
+  have ⟨varState₂', hvs₂'⟩ := setResultValues?_eq_some_of_varState varState₂ h₁
+  exists varState₂
+  constructor; grind
+  simp only [hvs₂', Option.some.injEq]
+  ext val value
+  grind [getVar?_setResultValues?, getVar?_setArgumentValues?]
+
 theorem VariableState.getVar?_setResultValues?_operand_of_dominates
-    (ctxDom : ctx.Dom) (hdom : op'.dominates op ctx) :
+    (ctxDom : ctx.Dom) (hdom : op'.Dominates op ctx) :
     value ∈ op'.getOperands! ctx.raw →
     varState.setResultValues? op resValues inBounds = some varState' →
     varState'.getVar? value =
@@ -213,7 +430,7 @@ theorem VariableState.getVar?_setResultValues?_operand_of_dominates
 
 @[grind =>]
 theorem VariableState.getOperandValues_setResultValues?_of_dominates
-    (ctxDom : ctx.Dom) (hdom : op'.dominates op ctx) :
+    (ctxDom : ctx.Dom) (hdom : op'.Dominates op ctx) :
     varState.setResultValues? op resValues inBounds = some varState' →
     varState'.getOperandValues op' = varState.getOperandValues op' := by
   intro h
@@ -262,7 +479,7 @@ theorem RuntimeValue.ArrayConforms_iff_setResultValues?_loop_eq_some :
       grind [ih varState']
 
 /-- `setResultValues?` succeeds iff every result value conforms to its result type. -/
-theorem VariableState.setResultValues?_isSome_iff_conforms :
+theorem VariableState.setResultValues?_isSome_iff_conforms (varState : VariableState ctx) inBounds :
     RuntimeValue.ArrayConforms resValues (op.getResultTypes! ctx.raw) ↔
     (∃ v, varState.setResultValues? op resValues inBounds = some v) := by
   simp only [setResultValues?]
@@ -283,6 +500,27 @@ theorem RuntimeValue.ArrayConforms_of_setResultValues?_eq_some
   rw [VariableState.setResultValues?_isSome_iff_conforms (inBounds := inBounds) (varState := varState)]
   grind
 
+/--
+Given that `OperationPtr.interpret` succeeds, that the operands are available in the interpreter
+state, and that the result values conform to the operation's result types, then `interpretOp`
+succeeds, and the variables in the resulting state are exactly the result values o
+`OperationPtr.interpret`.
+-/
+theorem interpretOp_forward
+    {ctx : WfIRContext OpCode} {op : OperationPtr} {state : InterpreterState ctx}
+    {inBounds : op.InBounds ctx.raw} {vals results : Array RuntimeValue} {mem' : MemoryState}
+    (hVals : state.variables.getOperandValues op = some vals)
+    (hInterp : op.interpret ctx vals state.memory = .ok (results, mem', none))
+    (hConf : RuntimeValue.ArrayConforms results (op.getResultTypes! ctx.raw)) :
+    ∃ state', interpretOp op state inBounds = .ok (state', none) ∧
+      state'.memory = mem' ∧
+      state.variables.setResultValues? op results = some state'.variables := by
+  obtain ⟨varState', hSet⟩ :=
+    (VariableState.setResultValues?_isSome_iff_conforms state.variables inBounds).mp hConf
+  have hsize : op.getNumResults! ctx.raw = results.size := by grind
+  exists ⟨varState', mem'⟩
+  grind [interpretOp_ok_iff_of_getOperandValues_eq_some]
+
 section interpretOpList
 
 variable {ctx : WfIRContext OpCode}
@@ -290,33 +528,33 @@ variable {state : InterpreterState ctx}
 
 @[simp, grind =]
 theorem interpretOpList_nil :
-    interpretOpList [] state inBounds = some (.ok (state, none)) := by
+    interpretOpList [] state inBounds = .ok (state, none) := by
   simp [interpretOpList, pure]
 
 theorem interpretOpList_cons :
     interpretOpList (op :: l) state inBounds =
     match interpretOp op state with
-    | none => none
-    | some .ub => some .ub
-    | some (.ok (state', none)) => interpretOpList l state' (by grind)
-    | some (.ok (state', some cf)) => some (.ok (state', some cf)) := by
+    | .fail => .fail
+    | .ub => .ub
+    | .ok (state', none) => interpretOpList l state' (by grind)
+    | .ok (state', some cf) => .ok (state', some cf) := by
   simp [interpretOpList, bind, pure]
   grind
 
 theorem interpretOpList_append :
     interpretOpList (l₁ ++ l₂) state inBounds =
     match interpretOpList l₁ state (by grind) with
-    | some (.ok (state', none)) => interpretOpList l₂ state' (by grind)
-    | some (.ok (state', some cf)) => some (.ok (state', some cf))
-    | some .ub => some .ub
-    | none => none := by
+    | .ok (state', none) => interpretOpList l₂ state' (by grind)
+    | .ok (state', some cf) => .ok (state', some cf)
+    | .ub => .ub
+    | .fail => .fail := by
   induction l₁ generalizing state
   · simp
   · grind [interpretOpList_cons]
 
 @[simp, grind =]
 theorem interpretTerminatedOpList_nil :
-    interpretTerminatedOpList [] state inBounds = none := by
+    interpretTerminatedOpList [] state inBounds = .fail := by
   simp [interpretTerminatedOpList, interpretOpList_nil, bind]
 
 theorem interpretTerminatedOpList_cons {ctx : WfIRContext OpCode}
@@ -325,20 +563,20 @@ theorem interpretTerminatedOpList_cons {ctx : WfIRContext OpCode}
     {inBounds : ∀ op' ∈ op :: l, op'.InBounds ctx.raw} :
     interpretTerminatedOpList (op :: l) state inBounds =
     match interpretOp op state with
-    | none => none
-    | some .ub => some .ub
-    | some (.ok (state', none)) => interpretTerminatedOpList l state' (by grind)
-    | some (.ok (state', some cf)) => some (.ok (state', cf)) := by
+    | .fail => .fail
+    | .ub => .ub
+    | .ok (state', none) => interpretTerminatedOpList l state' (by grind)
+    | .ok (state', some cf) => .ok (state', cf) := by
   simp [interpretTerminatedOpList, interpretOpList_cons, bind, pure]
   grind
 
 theorem interpretTerminatedOpList_append :
     interpretTerminatedOpList (l₁ ++ l₂) state inBounds =
     match interpretOpList l₁ state (by grind) with
-    | some (.ok (state', none)) => interpretTerminatedOpList l₂ state' (by grind)
-    | some (.ok (state', some cf))=> some (.ok (state', cf))
-    | some .ub => some .ub
-    | none => none := by
+    | .ok (state', none) => interpretTerminatedOpList l₂ state' (by grind)
+    | .ok (state', some cf)=> .ok (state', cf)
+    | .ub => .ub
+    | .fail => .fail := by
   simp [interpretTerminatedOpList, interpretOpList_append, bind, pure]
   grind
 
@@ -346,10 +584,10 @@ theorem interpretOpChain_of_next!_eq_some {state' : InterpreterState ctx}
     (hnext : (op.get! ctx.raw).next = some op') :
     interpretOpChain op state' inBounds =
     match interpretOp op state' (by grind) with
-    | none => none
-    | some .ub => some .ub
-    | some (.ok (state'', none)) => interpretOpChain op' state'' (by grind)
-    | some (.ok (state'', some cf)) => some (.ok (state'', cf)) := by
+    | .fail => .fail
+    | .ub => .ub
+    | .ok (state'', none) => interpretOpChain op' state'' (by grind)
+    | .ok (state'', some cf) => .ok (state'', cf) := by
   rw [interpretOpChain]
   simp [bind, pure]
   grind
@@ -358,10 +596,10 @@ theorem interpretOpChain_of_next!_eq_none {state' : InterpreterState ctx}
     (hnext : (op.get! ctx.raw).next = none) :
     interpretOpChain op state' inBounds =
     match interpretOp op state' (by grind) with
-    | none => none
-    | some .ub => some .ub
-    | some (.ok (_, none)) => none
-    | some (.ok (state'', some cf)) => some (.ok (state'', cf)) := by
+    | .fail => .fail
+    | .ub => .ub
+    | .ok (_, none) => .fail
+    | .ok (state'', some cf) => .ok (state'', cf) := by
   rw [interpretOpChain]
   simp [bind, pure]
   grind
@@ -398,12 +636,52 @@ theorem interpretOpChain_eq_interpretTerminatedOpList_of_firstOp
 
 end interpretOpList
 
-set_option warn.sorry false in
-theorem interpretOp'_monotone {operands operands' : Array RuntimeValue} :
+/-- An operation that verifies does not fail interpretation as long as the operands conform to
+the declared operand types. -/
+axiom interpretOp'_ne_fail {ctx : WfIRContext OpCode} {op : OperationPtr}
+    {opInBounds : op.InBounds ctx.raw} (opVerify : OperationPtr.Verified ctx op opInBounds)
+    (operandConforms : RuntimeValue.ArrayConforms operands (op.getOperandTypes! ctx.raw))
+    (mem : MemoryState) :
+  op.interpret ctx.raw operands mem ≠ .fail
+
+axiom interpretOp'_monotone
+    (opType : OpCode) (properties : propertiesOf opType) (resultTypes : Array TypeAttr)
+    (operands operands' : Array RuntimeValue) (blockOperands : Array BlockPtr) (mem : MemoryState) :
     operands ⊒ operands' →
     Interp.isRefinedBy (α := Array RuntimeValue × MemoryState × Option ControlFlowAction)
       (fun r₁ r₂ => r₁.1 ⊒ r₂.1 ∧ r₁.2.1 = r₂.2.1 ∧
         ControlFlowAction.optionIsRefinedBy r₁.2.2 r₂.2.2)
       (interpretOp' opType properties resultTypes operands blockOperands mem)
-      (interpretOp' opType properties resultTypes operands' blockOperands mem) := by
-  sorry
+      (interpretOp' opType properties resultTypes operands' blockOperands mem)
+
+/--
+A successful operation interpretation returns result values that conform to the declared
+`resultTypes` when the operation verifies.
+-/
+axiom interpretOp'_results_conform {ctx : WfIRContext OpCode}
+    {opInBounds : op.InBounds ctx.raw} (opVerif : op.Verified ctx opInBounds)
+    (conforms : RuntimeValue.ArrayConforms operands (op.getOperandTypes! ctx.raw))
+    (h : op.interpret ctx.raw operands mem = .ok (vals, mem', act)) :
+    RuntimeValue.ArrayConforms vals (op.getResultTypes! ctx.raw)
+
+/--
+A branch control-flow action returned by interpreting an operation always targets one of the
+provided successor blocks.
+-/
+axiom interpretOp'_branch_dest_mem
+    (h : interpretOp' opType properties resultTypes operands blockOperands mem
+      = .ok (vals, mem', some (.branch res dest))) :
+    dest ∈ blockOperands
+
+/--
+A branch control-flow action returned by interpreting an operation always targets one of the
+operation successors.
+-/
+theorem interpretOp_branch_dest_mem_getSuccessors!
+    {ctx : WfIRContext OpCode} {op : OperationPtr} {state state' : InterpreterState ctx}
+    {inBounds : op.InBounds ctx.raw} {res : Array RuntimeValue} {dest : BlockPtr}
+    (h : interpretOp op state inBounds = .ok (state', some (.branch res dest))) :
+    dest ∈ op.getSuccessors! ctx.raw := by
+  obtain ⟨operandValues, resValues, mem', varState', hOperand, hInterp', hSetRes, hStateEq⟩ :=
+    interpretOp_some_iff.mp h
+  exact interpretOp'_branch_dest_mem hInterp'

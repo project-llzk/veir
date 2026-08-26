@@ -1,9 +1,14 @@
-import Veir.PatternRewriter.Basic
-import Veir.Interpreter
-import Veir.IR.WellFormed
-import Veir.Passes.Matching
-import Veir.Rewriter.WfRewriter
-import Veir.Interpreter.Refinement.Basic
+module
+
+public import Veir.Interpreter
+public import Veir.Passes.Matching
+public import Veir.PatternRewriter.Basic
+import Veir.Dominance.Basic
+
+import all Veir.Interpreter.Basic
+
+public section
+
 namespace Veir
 
 variable {OpInfo : Type} [HasOpInfo OpInfo]
@@ -23,7 +28,7 @@ inductive WfIRContext.WithCreatedOps : WfIRContext OpInfo → WfIRContext OpInfo
 | CreatedOp
     (ctx₁ ctx₂ ctx₃ : WfIRContext OpInfo)
     (h : WithCreatedOps ctx₁ ctx₂)
-    (h₂ : ∃ opType resultTypes operands successors regions properties h₁ h₂ h₃ h₄,
+    (h₂ : ∃ (opType : OpInfo), ∃ resultTypes operands successors regions properties h₁ h₂ h₃ h₄,
       WfRewriter.createOp ctx₂ opType resultTypes operands successors
         regions properties none h₁ h₂ h₃ h₄ = some (ctx₃, newOp))
     : WithCreatedOps ctx₁ ctx₃
@@ -74,6 +79,17 @@ def LocalRewritePattern.ReturnOps
   ∀ newOp, newOp ∈ newOps ↔ newOp.InBounds newCtx.raw ∧ ¬newOp.InBounds ctx.raw
 
 /--
+The operations returned by the pattern are pairwise distinct.
+
+Since we insert the returned operations one by one before the matched operation, the rewrite
+must not return the same operation twice.
+-/
+def LocalRewritePattern.ReturnOpsNodup (pattern : LocalRewritePattern OpCode) : Prop :=
+  ∀ ctx op newCtx newOps newValues,
+  pattern ctx op = some (newCtx, some (newOps, newValues)) →
+  newOps.toList.Nodup
+
+/--
 The pattern returns the same number of values as the number of results of the matched operation.
 -/
 def LocalRewritePattern.ReturnValues (pattern : LocalRewritePattern OpCode) : Prop :=
@@ -87,6 +103,24 @@ All values returned by the pattern are in bounds of the new context.
 def LocalRewritePattern.ReturnValuesInBounds (pattern : LocalRewritePattern OpCode) : Prop :=
   ∀ ctx op newCtx newOps newValues, pattern ctx op = some (newCtx, some (newOps, newValues)) →
   ∀ v ∈ newValues, v.InBounds newCtx.raw
+
+/-- No value returned by the pattern is one of `op`'s own result pointers. -/
+def LocalRewritePattern.ReturnValuesNotOwnResults (pattern : LocalRewritePattern OpCode) : Prop :=
+  ∀ ctx op newCtx newOps newValues, pattern ctx op = some (newCtx, some (newOps, newValues)) →
+  ∀ v ∈ newValues, v ∉ op.getResults! newCtx.raw
+
+/--
+Every new value that comes from the original context has to dominate the program point where the
+old operation is being replaced.
+-/
+def LocalRewritePattern.ReturnValuesDominate (pattern : LocalRewritePattern OpCode) : Prop :=
+  ∀ ctx op newCtx newOps newValues, pattern ctx op = some (newCtx, some (newOps, newValues)) →
+  ∀ v ∈ newValues, v.InBounds ctx.raw → v.dominatesIp (InsertPoint.before op) ctx
+
+/-- The matched operation has no regions. -/
+def LocalRewritePattern.MatchedOpHasNoRegions (pattern : LocalRewritePattern OpCode) : Prop :=
+  ∀ ctx op newCtx newOps newValues, pattern ctx op = some (newCtx, some (newOps, newValues)) →
+  op.getNumRegions! ctx.raw = 0
 
 /--
 Indexed access on the returned values is in bounds of the new context.
@@ -141,16 +175,81 @@ def LocalRewritePattern.PreservesSemantics
   (pattern : LocalRewritePattern OpCode)
   (_ : pattern.ReturnOps) (_ : pattern.ReturnCtxChanges)
   (_ : pattern.ReturnValuesInBounds) (_ : pattern.ReturnValues) : Prop :=
-  ∀ ctx (ctxDom : ctx.Dom) (ctxVerif : ctx.Verified) (op : OperationPtr) (opInBounds : op.InBounds ctx.raw),
+  ∀ ctx root (ctxDom : ctx.Dom) (ctxVerif : ctx.Verified root)
+    (op : OperationPtr) (opInBounds : op.InBounds ctx.raw),
   ∀ newCtx newOps newValues (hpattern : pattern ctx op = some (newCtx, some (newOps, newValues))),
   ∀ (state : InterpreterState ctx), state.EquationLemmaAt (InsertPoint.before op) →
   ∀ newState cf, interpretOp op state = some (newState, cf) →
   ∀ sourceValues, (op.getResults ctx.raw).mapM (newState.variables.getVar? ·) = some sourceValues →
   ∀ (state' : InterpreterState newCtx), state'.EquationLemmaAt (InsertPoint.before op) →
-  state.isRefinedBy state' (LocalRewritePattern.mapping hpattern) →
+  state'.DefinesDominating (InsertPoint.before op) →
+  state.isRefinedByAt state' (LocalRewritePattern.mapping hpattern) (.at (.before op)) (.at (.before op)) →
   ∃ newState',
     interpretOpList newOps.toList state' (by grind [ReturnOps]) = some (newState', cf) ∧
     newState.memory = newState'.memory ∧
     ∃ targetValues,
       newValues.mapM (newState'.variables.getVar? ·) = some targetValues ∧
       sourceValues ⊒ targetValues
+
+/--
+Applying the pattern as a local rewrite preserves the dominance-wellformedness of the context.
+-/
+def LocalRewritePattern.RewritePreservesDom (pattern : LocalRewritePattern OpCode) : Prop :=
+  ∀ (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    (opInBounds : op.InBounds rewriter.ctx.raw) (rewriter' : PatternRewriter OpCode),
+    RewritePattern.fromLocalRewrite pattern rewriter op opInBounds = some rewriter' →
+    rewriter.ctx.Dom → rewriter'.ctx.Dom
+
+/--
+Applying the pattern as a local rewrite preserves the verification-wellformedness of the context.
+-/
+def LocalRewritePattern.RewritePreservesVerified (pattern : LocalRewritePattern OpCode) : Prop :=
+  ∀ (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    (opInBounds : op.InBounds rewriter.ctx.raw) (rewriter' : PatternRewriter OpCode),
+    RewritePattern.fromLocalRewrite pattern rewriter op opInBounds = some rewriter' →
+    ∀ root, rewriter.ctx.Verified root → rewriter'.ctx.Verified root
+
+/--
+Preserves block-level dominance.
+This is a strong property that will be simplified in the future in favor of a condition
+on the successors of the matched operation and the new operations.
+-/
+def LocalRewritePattern.RewritePreservesBlockDominance (pattern : LocalRewritePattern OpCode) : Prop :=
+  ∀ (rewriter : PatternRewriter OpCode) (op : OperationPtr)
+    (opInBounds : op.InBounds rewriter.ctx.raw) (rewriter' : PatternRewriter OpCode),
+    RewritePattern.fromLocalRewrite pattern rewriter op opInBounds = some rewriter' →
+    ∀ (b₁ b₂ : BlockPtr), b₁.InBounds rewriter.ctx.raw → b₂.InBounds rewriter.ctx.raw →
+      (b₁.Dominates b₂ rewriter'.ctx ↔ b₁.Dominates b₂ rewriter.ctx)
+
+/--
+This proposition contains all the correctness obligations that a `LocalRewritePattern` must satisfy
+to derive a proof of global soundness of the transformation.
+-/
+structure LocalRewritePattern.Sound (pattern : LocalRewritePattern OpCode) : Prop where
+  /-- The pattern returns the input context whenever there are no errors and no match. -/
+  returnsCtxNoChanges : pattern.ReturnsCtxNoChanges
+  /-- On a match, the output context is only modified by creating new operations. -/
+  returnCtxChanges : pattern.ReturnCtxChanges
+  /-- On a match, the returned operations are exactly the newly created ones. -/
+  returnOps : pattern.ReturnOps
+  /-- The returned operations are pairwise distinct (required for the driver's insert loop). -/
+  returnOpsNodup : pattern.ReturnOpsNodup
+  /-- The pattern returns one value per result of the matched operation. -/
+  returnValues : pattern.ReturnValues
+  /-- All returned values are in bounds of the new context. -/
+  returnValuesInBounds : pattern.ReturnValuesInBounds
+  /-- No returned value is one of `op`'s own result pointers. -/
+  returnValuesNotOwnResults : pattern.ReturnValuesNotOwnResults
+  /-- Every forwarded pre-existing returned value dominates the point before `op`. -/
+  returnValuesDominate : pattern.ReturnValuesDominate
+  /-- The matched operation has no regions. -/
+  matchedOpHasNoRegions : pattern.MatchedOpHasNoRegions
+  /-- Interpreting the matched operation is refined by interpreting the new operations. -/
+  preservesSemantics :
+    pattern.PreservesSemantics returnOps returnCtxChanges returnValuesInBounds returnValues
+  /-- The driver-applied rewrite preserves dominance-wellformedness. -/
+  rewritePreservesDom : pattern.RewritePreservesDom
+  /-- The driver-applied rewrite preserves verification. -/
+  rewritePreservesVerified : pattern.RewritePreservesVerified
+  /-- The driver-applied rewrite preserves block-level dominance. -/
+  rewritePreservesBlockDominance : pattern.RewritePreservesBlockDominance

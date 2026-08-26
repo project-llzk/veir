@@ -3,7 +3,7 @@
 // Negative test: cast.tofelt with no operand triggers the typed
 // "Expected 1 operand" arm; the unregistered fallthrough would accept.
 
-// CHECK: Error verifying input program: Expected 1 operand
+// CHECK: Error verifying input program: cast.tofelt: Expected 1 operand(s)
 "builtin.module"() ({
 ^bb0():
   %0 = "cast.tofelt"() : () -> !felt.type

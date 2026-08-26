@@ -1,11 +1,8 @@
 module
 
-import Std.Data.HashMap
-import Veir.Prelude
-public import Veir.IR.OpInfo
+public import Veir.Prelude
+public import Veir.IR.OpCode
 public import Veir.ForLean
-public import Veir.IR.Attribute
-public import Std.Data.HashMap.Basic
 public import Veir.IR.Simp
 
 open Std (HashMap)
@@ -164,7 +161,7 @@ deriving Inhabited, Repr, Hashable
 /--
 An MLIR operation.
 -/
-structure Operation (OpInfo : Type) [HasOpInfo OpInfo] where
+structure Operation (OpInfo : Type) [IsOpCode OpInfo] where
   results : Array OpResult
   -- This is the operation pointer start
   prev : Option OperationPtr
@@ -176,13 +173,14 @@ structure Operation (OpInfo : Type) [HasOpInfo OpInfo] where
   opType : OpInfo
   attrs : DictionaryAttr
   -- This should be replaced with an arbitrary user object
-  properties : HasOpInfo.propertiesOf opType
+  properties : propertiesOf opType
   blockOperands : Array BlockOperand
   regions : Array RegionPtr
   operands : Array OpOperand
 deriving Inhabited, Repr, Hashable
 
-variable {OpInfo : Type} [HasOpInfo OpInfo]
+variable {OpInfo : Type} [IsOpCode OpInfo]
+variable {Dialect : Type} [IsOpCode Dialect] [HasDialect OpInfo Dialect]
 
 namespace Operation
 
@@ -200,6 +198,10 @@ theorem default_blockOperands_eq :
 
 theorem default_results_eq :
     (default : Operation OpInfo).results = #[] := by
+  rfl
+
+theorem default_parent_eq :
+    (default : Operation OpInfo).parent = none := by
   rfl
 
 end Operation
@@ -312,7 +314,7 @@ The owning context of an MLIR module.
 It contains a top-level Module operation, and a maps from pointers to
 operations, blocks, and regions.
 -/
-structure IRContext (OpInfo : Type) [HasOpInfo OpInfo] where
+structure IRContext (OpInfo : Type) [IsOpCode OpInfo] where
   operations : HashMap OperationPtr (Operation OpInfo)
   blocks : HashMap BlockPtr Block
   regions : HashMap RegionPtr Region
@@ -326,7 +328,7 @@ variable {ctx ctx' : IRContext OpInfo}
 /-! Empty objects. -/
 
 @[expose]
-def Operation.empty (opType : OpInfo) (prop : HasOpInfo.propertiesOf opType) : Operation OpInfo :=
+def Operation.empty (opType : OpInfo) (prop : propertiesOf opType) : Operation OpInfo :=
   { results := #[]
     prev := none
     next := none
@@ -489,6 +491,54 @@ theorem getOperands!.getElem!_eq_getOperand! {op : OperationPtr} :
 theorem getOperands!.getElem_eq_getOperand! {op : OperationPtr} {h} :
     (op.getOperands! ctx)[index]'h = op.getOperand! ctx index := by
   grind [getOperands!, getOperand!]
+
+def getOpOperands (op : OperationPtr) (ctx : IRContext OpInfo)
+    (inBounds : op.InBounds ctx := by grind) : Array OpOperandPtr :=
+  Array.map op.getOpOperand (Array.range (op.getNumOperands ctx inBounds))
+
+def getOpOperands! (op : OperationPtr) (ctx : IRContext OpInfo) : Array OpOperandPtr :=
+  Array.map op.getOpOperand (Array.range (op.getNumOperands! ctx))
+
+@[grind =_, eq_bang ←]
+theorem getOpOperands!_eq_getOpOperands {op : OperationPtr} (hin : op.InBounds ctx) :
+    op.getOpOperands! ctx = op.getOpOperands ctx (by grind) := by
+  grind [getOpOperands, getOpOperands!]
+
+theorem getOpOperands!.mem_iff_exists_index {op : OperationPtr} :
+    operand ∈ op.getOpOperands! ctx ↔
+    ∃ index, index < op.getNumOperands! ctx ∧ op.getOpOperand index = operand := by
+  simp only [getOpOperands!, Array.mem_map, getOpOperand, getNumOperands!]
+  constructor
+  · rintro ⟨opr, ⟨hopr, oprValue⟩⟩
+    have ⟨i, hi, hopr⟩ := Array.getElem_of_mem hopr
+    exists i
+    grind
+  · grind
+
+theorem getOpOperands!.mem_getOpOperand {op : OperationPtr} :
+    index < op.getNumOperands! ctx →
+    op.getOpOperand index ∈ op.getOpOperands! ctx := by
+  grind [getOpOperands!, getOpOperand, getNumOperands!]
+
+@[simp, grind =]
+theorem getOpOperands!.size_eq_getNumOperands! {op : OperationPtr} :
+    (op.getOpOperands! ctx).size = op.getNumOperands! ctx := by
+  grind [getOpOperands!, getNumOperands!]
+
+@[simp, grind =]
+theorem getOpOperands!.getElem!_eq_getOpOperand {op : OperationPtr} :
+    index < op.getNumOperands! ctx →
+    (op.getOpOperands! ctx)[index]! = op.getOpOperand index := by
+  simp only [getOpOperands!]
+  grind [getOpOperand]
+
+@[simp, grind =]
+theorem getOpOperands!.getElem_eq_getOpOperand
+    {op : OperationPtr} {h : index < (op.getOpOperands! ctx).size} :
+    index < op.getNumOperands! ctx →
+    (op.getOpOperands! ctx)[index]'h = op.getOpOperand index := by
+  simp only [getOpOperands!]
+  grind [getOpOperand]
 
 def getOperandTypes (op : OperationPtr) (ctx : IRContext OpInfo)
     (inBounds : op.InBounds ctx := by grind) : Array TypeAttr :=
@@ -801,6 +851,51 @@ theorem getRegion!_eq_of_OperationPtr_get!_eq {op : OperationPtr} :
     op.getRegion! ctx = op.getRegion! ctx' := by
   grind [get!, getRegion!]
 
+def getRegions (op : OperationPtr) (ctx : IRContext OpInfo)
+    (inBounds : op.InBounds ctx := by grind) : Array RegionPtr :=
+  (op.get ctx inBounds).regions
+
+def getRegions! (op : OperationPtr) (ctx : IRContext OpInfo) : Array RegionPtr :=
+  (op.get! ctx).regions
+
+@[grind =_, eq_bang ←]
+theorem getRegions!_eq_getRegions {op : OperationPtr} (hin : op.InBounds ctx) :
+    op.getRegions! ctx = op.getRegions ctx (by grind) := by
+  grind [getRegions, getRegions!]
+
+theorem getRegions!.mem_iff_exists_index {op : OperationPtr} :
+    region ∈ op.getRegions! ctx ↔
+    ∃ index, index < op.getNumRegions! ctx ∧ op.getRegion! ctx index = region := by
+  simp only [getRegions!, getRegion!, getNumRegions!]
+  constructor
+  · rintro hregion
+    have ⟨i, hi, hregion⟩ := Array.getElem_of_mem hregion
+    exists i
+    grind
+  · grind
+
+theorem getRegions!.mem_getRegion! {op : OperationPtr} :
+    index < op.getNumRegions! ctx →
+    op.getRegion! ctx index ∈ op.getRegions! ctx := by
+  grind [getRegions!, getRegion!, getNumRegions!]
+
+@[simp, grind =]
+theorem getRegions!.size_eq_getNumRegions! {op : OperationPtr} :
+    (op.getRegions! ctx).size = op.getNumRegions! ctx := by
+  grind [getRegions!, getNumRegions!]
+
+@[simp, grind =]
+theorem getRegions!.getElem!_eq_getRegion! {op : OperationPtr} :
+    (op.getRegions! ctx)[index]! = op.getRegion! ctx index := by
+  simp only [getRegions!, getRegion!]
+
+@[simp, grind =]
+theorem getRegions!.getElem_eq_getRegion!
+    {op : OperationPtr} {h : index < (op.getRegions! ctx).size} :
+    (op.getRegions! ctx)[index]'h = op.getRegion! ctx index := by
+  simp only [getRegions!, getRegion!]
+  grind
+
 def set (ptr : OperationPtr) (ctx : IRContext OpInfo) (newOp : Operation OpInfo) : IRContext OpInfo :=
   {ctx with operations := ctx.operations.insert ptr newOp}
 
@@ -967,52 +1062,84 @@ theorem setAttributes!_eq_setAttributes {op : OperationPtr} (inBounds : op.InBou
     op.setAttributes! ctx newAttrs = op.setAttributes ctx newAttrs inBounds := by
   grind [setAttributes, setAttributes!]
 
+/--
+Get the properties of an operation of type `opCode`.
+The passed `opCode` can either be of the global `OpInfo` type, or the dialect-specific `Dialect`
+type, in order to get the dialect-specific properties which is often easier to use.
+-/
 @[inline]
-def getProperties (op : OperationPtr) (ctx : IRContext OpInfo) (opCode : OpInfo)
+def getProperties (op : OperationPtr) (ctx : IRContext OpInfo) (opCode : Dialect)
     (inBounds : op.InBounds ctx := by grind)
-    (hprop : op.getOpType! ctx = opCode := by grind) : HasOpInfo.propertiesOf opCode :=
+    (hprop : op.getOpType! ctx = opCode := by grind) : propertiesOf opCode :=
   have h : (op.get ctx inBounds).opType = opCode := by grind [getOpType!]
-  h ▸ (op.get ctx (by grind)).properties
+  let globalProperties := h ▸ (op.get ctx (by grind)).properties
+  HasDialect.toDialectProperties opCode globalProperties
 
+/--
+Get the properties of an operation of type `opCode`.
+The passed `opCode` can either be of the global `OpInfo` type, or the dialect-specific `Dialect`
+type, in order to get the dialect-specific properties which is often easier to use.
+
+This function returns the default properties if the operation is not in bounds, or if the
+operation's type does not match the passed `opCode`.
+-/
 @[inline]
-def getProperties! (op : OperationPtr) (ctx : IRContext OpInfo) (opCode : OpInfo) : HasOpInfo.propertiesOf opCode :=
+def getProperties! (op : OperationPtr) (ctx : IRContext OpInfo)
+    (opCode : Dialect) : propertiesOf opCode :=
   if h : (op.get! ctx).opType = opCode then
-    h ▸ (op.get! ctx).properties
+    let globalProperties := h ▸ (op.get! ctx).properties
+    HasDialect.toDialectProperties opCode globalProperties
   else
     default
 
 @[grind =_, eq_bang ←]
 theorem getProperties!_eq_getProperties {op : OperationPtr} (inBounds : op.InBounds ctx)
-    (hprop : op.getOpType! ctx = opCode) :
+    {opCode : Dialect} (hprop : op.getOpType! ctx = opCode) :
     op.getProperties! ctx opCode = op.getProperties ctx opCode inBounds (by grind) := by
   grind [getProperties, getProperties!]
 
-theorem getProperties!_eq_of_OperationPtr_get!_eq {op : OperationPtr} :
+theorem getProperties!_eq_of_OperationPtr_get!_eq {op : OperationPtr} {opCode : Dialect} :
     op.get! ctx = op.get! ctx' →
     op.getProperties! ctx opCode = op.getProperties! ctx' opCode := by
   grind [OperationPtr.get!, getProperties!]
 
-def setProperties {opCode : OpInfo} (op : OperationPtr) (ctx : IRContext OpInfo)
-    (newProperties : HasOpInfo.propertiesOf opCode)
+/--
+Set the properties of an operation of type `opCode`.
+The passed `opCode` can either be of the global `OpInfo` type, or the dialect-specific
+`Dialect` type. The `OpInfo` version is often the one used when manipulating generic operations,
+while the `Dialect` version is often easier to use when manipulating dialect-specific operations.
+-/
+def setProperties (op : OperationPtr) (ctx : IRContext OpInfo) (opCode : Dialect)
+    (newProperties : propertiesOf opCode)
     (inBounds : op.InBounds ctx := by grind)
     (hprop : op.getOpType! ctx = opCode := by grind) : IRContext OpInfo :=
   have h : (op.get ctx inBounds).opType = opCode := by grind [getOpType!]
   let oldOp := op.get ctx (by grind)
-  op.set ctx { oldOp with properties := h ▸ newProperties }
+  let newPropertiesGlobal := HasDialect.ofDialectProperties OpInfo opCode newProperties
+  op.set ctx { oldOp with properties := h ▸ newPropertiesGlobal }
 
-def setProperties! {opCode : OpInfo} (op : OperationPtr) (ctx : IRContext OpInfo)
-  (newProperties : HasOpInfo.propertiesOf opCode)
+/--
+Set the properties of an operation of type `opCode`.
+The implicitely passed `opCode` can either be of the global `OpInfo` type, or the dialect-specific
+`Dialect` type. The `OpInfo` version is often the one used when manipulating generic operations,
+while the `Dialect` version is often easier to use when manipulating dialect-specific operations.
+
+This function panics if the given operation is not in bounds.
+-/
+def setProperties! {opCode : Dialect} (op : OperationPtr) (ctx : IRContext OpInfo)
+  (newProperties : propertiesOf opCode)
   (hprop : op.getOpType! ctx = opCode := by grind) : IRContext OpInfo :=
   have h : (op.get! ctx).opType = opCode := by grind [getOpType!]
   let oldOp := op.get! ctx
-  op.set ctx { oldOp with properties := h ▸ newProperties }
+  let newPropertiesGlobal := HasDialect.ofDialectProperties OpInfo opCode newProperties
+  op.set ctx { oldOp with properties := h ▸ newPropertiesGlobal }
 
 @[grind =_, eq_bang ←]
-theorem setProperties!_eq_setProperties {op : OperationPtr}
-    (newProperties : HasOpInfo.propertiesOf opCode) (inBounds : op.InBounds ctx)
+theorem setProperties!_eq_setProperties {op : OperationPtr} {opCode : Dialect}
+    (newProperties : propertiesOf opCode) (inBounds : op.InBounds ctx)
     (hprop : op.getOpType! ctx = opCode) :
     op.setProperties! ctx newProperties =
-    op.setProperties ctx newProperties inBounds := by
+    op.setProperties ctx opCode newProperties inBounds := by
   grind [setProperties, setProperties!]
 
 def nextOperand (op : OperationPtr) (ctx : IRContext OpInfo)
@@ -1066,10 +1193,13 @@ theorem nextResult!_eq_getResult {op : OperationPtr} :
     op.nextResult! ctx = op.getResult (op.getNumResults! ctx) := by
   rfl
 
-def allocEmpty (ctx : IRContext OpInfo) (opType : OpInfo) (properties : HasOpInfo.propertiesOf opType) :
+def allocEmpty {Dialect : Type} [IsOpCode Dialect] [HasDialect OpInfo Dialect]
+    (ctx : IRContext OpInfo) (opType : Dialect)
+    (properties : propertiesOf opType) :
     Option (IRContext OpInfo × OperationPtr) :=
   let newOpPtr : OperationPtr := ⟨ctx.nextID⟩
-  let operation := Operation.empty opType properties
+  let globalProperties := HasDialect.ofDialectProperties OpInfo opType properties
+  let operation := Operation.empty (opType : OpInfo) globalProperties
   if _ : ctx.operations.contains newOpPtr then none else
   let ctx := { ctx with nextID := ctx.nextID + 1 }
   let ctx := newOpPtr.set ctx operation
@@ -1677,6 +1807,23 @@ theorem getArguments!.getElem_eq_getArgument
   simp only [getArguments!, getArgument]
   grind
 
+def getArgumentTypes (block : BlockPtr) (ctx : IRContext OpInfo)
+    (inBounds : block.InBounds ctx := by grind) : Array TypeAttr :=
+  (block.get ctx).arguments.map (·.type)
+
+def getArgumentTypes! (block : BlockPtr) (ctx : IRContext OpInfo) : Array TypeAttr :=
+  (block.get! ctx).arguments.map (·.type)
+
+@[grind =_, eq_bang ←]
+theorem getArgumentTypes!_eq_getArgumentTypes {block : BlockPtr} (hin : block.InBounds ctx) :
+    block.getArgumentTypes! ctx = block.getArgumentTypes ctx (by grind) := by
+  grind [getArgumentTypes, getArgumentTypes!, get!_eq_get]
+
+@[grind =]
+theorem getArgumentTypes!.size_eq_getNumArguments! {block : BlockPtr} :
+    (block.getArgumentTypes! ctx).size = block.getNumArguments! ctx := by
+  grind [getArgumentTypes!, getNumArguments!]
+
 def nextArgument (block : BlockPtr) (ctx : IRContext OpInfo)
     (inBounds: block.InBounds ctx := by grind) : BlockArgumentPtr :=
   getArgument block (block.getNumArguments ctx (by grind))
@@ -1869,6 +2016,19 @@ theorem block_of_mem_getArguments! {blockArg : BlockArgumentPtr} (blockArgIn : b
 
 end BlockArgumentPtr
 
+@[simp, grind =]
+theorem BlockPtr.getArgumentTypes!.getElem!_eq_getArgument {op : BlockPtr} :
+    index < op.getNumArguments! ctx →
+    (op.getArgumentTypes! ctx)[index]! = ((op.getArgument index).get! ctx).type := by
+  grind [BlockPtr.getNumArguments!, getArgumentTypes!, getArgument, BlockArgumentPtr.get!]
+
+@[simp, grind =]
+theorem BlockPtr.getArgumentTypes!.getElem_eq_getArgument
+    {block : BlockPtr} {h : index < (block.getArgumentTypes! ctx).size} :
+    index < block.getNumArguments! ctx →
+    (block.getArgumentTypes! ctx)[index]'h = ((block.getArgument index).get! ctx).type := by
+  grind [BlockPtr.getNumArguments!, getArgumentTypes!, getArgument, BlockArgumentPtr.get!]
+
 /-!
  ValuePtr accessors
 -/
@@ -1975,50 +2135,32 @@ theorem getFirstUse!_blockArgument_eq {ba : BlockArgumentPtr} {ctx : IRContext O
     (blockArgument ba).getFirstUse! ctx = (ba.get! ctx).firstUse := by
   grind [getFirstUse!]
 
-def getDefiningOp (value : ValuePtr) (ctx : IRContext OpInfo)
-    (valueIn : value.InBounds ctx := by grind) : Option OperationPtr :=
+def definingOp? (value : ValuePtr) : Option OperationPtr :=
   match value with
-  | opResult ptr => (ptr.get ctx).owner
+  | opResult ptr => some ptr.op
   | blockArgument _ => none
 
-def getDefiningOp! (value : ValuePtr) (ctx : IRContext OpInfo) : Option OperationPtr :=
-  match value with
-  | opResult ptr => some (ptr.get! ctx).owner
-  | blockArgument _ => none
-
-theorem getDefiningOp!_def {value : ValuePtr} :
-    value.getDefiningOp! ctx =
-      match value with
-      | opResult ptr => some (ptr.get! ctx).owner
-      | blockArgument _ => none := by
-  grind [getDefiningOp!]
-
-@[grind =_, eq_bang ←]
-theorem getDefiningOp!_eq_getDefiningOp {ptr : ValuePtr} (hin : ptr.InBounds ctx) :
-    ptr.getDefiningOp! ctx = ptr.getDefiningOp ctx hin := by
-  unfold getDefiningOp getDefiningOp!; grind
+@[simp, grind =]
+theorem definingOp?_opResult :
+    (opResult res).definingOp? = some res.op := by
+  grind [definingOp?]
 
 @[simp, grind =]
-theorem getDefiningOp!_opResult :
-    (opResult res).getDefiningOp! ctx = some (res.get! ctx).owner := by
-  grind [getDefiningOp!]
-
-@[simp, grind =]
-theorem getDefiningOp!_blockArgument :
-    (blockArgument ba).getDefiningOp! ctx = none := by
-  grind [getDefiningOp!]
+theorem definingOp?_blockArgument :
+    (blockArgument ba).definingOp? = none := by
+  grind [definingOp?]
 
 @[grind =]
-theorem getDefiningOp!_eq_some_iff {value : ValuePtr} :
-    value.getDefiningOp! ctx = some op ↔
-    ∃ opRes, value = opResult opRes ∧ (opRes.get! ctx).owner = op := by
-  grind [getDefiningOp!, cases ValuePtr]
+theorem definingOp?_eq_some_iff {value : ValuePtr} :
+    value.definingOp? = some op ↔
+    ∃ opRes, value = opResult opRes ∧ opRes.op = op := by
+  grind [definingOp?, cases ValuePtr]
 
 @[grind =]
-theorem getDefiningOp!_eq_none_iff {value : ValuePtr} :
-    value.getDefiningOp! ctx = none ↔
+theorem definingOp?_eq_none_iff {value : ValuePtr} :
+    value.definingOp? = none ↔
     ∃ blockArg, value = blockArgument blockArg := by
-  grind [getDefiningOp!, cases ValuePtr]
+  grind [definingOp?, cases ValuePtr]
 
 /--
 Returns true if the value has any uses.
@@ -2296,7 +2438,7 @@ theorem get!_of_not_inBounds {ptr : RegionPtr} (notInBounds : ¬ ptr.InBounds ct
 def set (ptr : RegionPtr) (ctx : IRContext OpInfo) (newRegion : Region) : IRContext OpInfo :=
   {ctx with regions := ctx.regions.insert ptr newRegion}
 
-def setParent (region : RegionPtr) (ctx : IRContext OpInfo) (newParent : OperationPtr)
+def setParent (region : RegionPtr) (ctx : IRContext OpInfo) (newParent : Option OperationPtr)
     (inBounds : region.InBounds ctx := by grind) : IRContext OpInfo :=
   let oldRegion := region.get ctx (by grind)
   region.set ctx { oldRegion with parent := newParent}
@@ -2437,10 +2579,39 @@ end BlockOperandPtrPtr
 
 namespace OperationPtr
 
+/-- Return the region directly containing an operation, if one exists. -/
+def getParentRegion! (op : OperationPtr) (ctx : IRContext OpInfo) : Option RegionPtr := do
+  let block ← (op.get! ctx).parent
+  (block.get! ctx).parent
+
+@[grind =]
+theorem getParentRegion!_eq_some_iff {op : OperationPtr} :
+    op.getParentRegion! ctx = some region ↔
+      ∃ block,
+        (op.get! ctx).parent = some block ∧
+        (block.get! ctx).parent = some region := by
+  simp only [OperationPtr.getParentRegion!, bind, Option.bind]
+  grind
+
+theorem getParentRegion!_eq_some_of_parent_of_parent {op : OperationPtr} :
+    (op.get! ctx).parent = some block →
+    (block.get! ctx).parent = some region →
+    op.getParentRegion! ctx = some region := by
+  grind [OperationPtr.getParentRegion!]
+
+@[expose]
 def getParentOp! (op : OperationPtr) (ctx : IRContext OpInfo) : Option OperationPtr := do
-  rlet block ← (op.get! ctx).parent
-  rlet region ← (block.get! ctx).parent
+  let region ← op.getParentRegion! ctx
   (region.get! ctx).parent
+
+theorem getParentOp!_eq_some_iff {child parent : OperationPtr} {ctx : IRContext OpInfo} :
+    child.getParentOp! ctx = some parent ↔
+      ∃ block region,
+        (child.get! ctx).parent = some block ∧
+        (block.get! ctx).parent = some region ∧
+        (region.get! ctx).parent = some parent := by
+  simp only [OperationPtr.getParentOp!, bind, Option.bind]
+  grind
 
 def hasUses.loop (op : OperationPtr) (ctx : IRContext OpInfo) (index : Nat)
     (opIn : op.InBounds ctx := by grind)
@@ -2512,7 +2683,67 @@ theorem hasUses!_eq_false_iff_hasUses!_opResult_eq_false {op : OperationPtr}
 
 end OperationPtr
 
-def IRContext.empty (OpInfo : Type) [HasOpInfo OpInfo] : IRContext OpInfo := {
+/-- Return the region containing a value's definition, if it is linked into one. -/
+def ValuePtr.getParentRegion! (value : ValuePtr) (ctx : IRContext OpInfo) : Option RegionPtr :=
+  match value with
+  | .opResult result => result.op.getParentRegion! ctx
+  | .blockArgument argument => (argument.block.get! ctx).parent
+
+/-- `ops` is a contiguous chain of operations in a block `parent` in context `ctx`: each operation's
+`.next` field points to the following operation in the list, and each operation's `.parent` field
+points to `parent`. -/
+@[expose]
+def BlockPtr.OpChainSlice (ctx : IRContext OpInfo) (parent : BlockPtr) : List OperationPtr → Prop
+  | [] => True
+  | a :: l =>
+    a.InBounds ctx ∧
+    (a.get! ctx).parent = some parent ∧
+    (∀ b, l.head? = some b → (a.get! ctx).next = some b) ∧
+    BlockPtr.OpChainSlice ctx parent l
+
+namespace BlockPtr.OpChainSlice
+
+/-- All operations in an operation chain slice are in bounds. -/
+@[grind →]
+theorem inBounds_of_mem {ctx : IRContext OpInfo} {parent : BlockPtr} {ops : List OperationPtr}
+    (h : BlockPtr.OpChainSlice ctx parent ops) :
+    ∀ op, op ∈ ops → op.InBounds ctx := by
+  induction ops <;> simp [BlockPtr.OpChainSlice] at h <;> grind
+
+/-- All operations in an operation chain slice have the expected parent. -/
+@[grind →]
+theorem parent_of_mem {ctx : IRContext OpInfo} {parent : BlockPtr} {ops : List OperationPtr}
+    (h : BlockPtr.OpChainSlice ctx parent ops) :
+    ∀ op, op ∈ ops → (op.get! ctx).parent = some parent := by
+  induction ops <;> simp [BlockPtr.OpChainSlice] at h <;> grind
+
+/-- The empty list is always an operation chain slice. -/
+@[simp, grind .]
+theorem nil {ctx : IRContext OpInfo} {parent : BlockPtr} :
+    BlockPtr.OpChainSlice ctx parent [] := by
+  simp [BlockPtr.OpChainSlice]
+
+/-- An `head :: tail` list is an operation chain slice iff the tail is an operation chain slice,
+and the head is in bounds, has the same parent, and points to the tail. -/
+theorem cons_iff {ctx : IRContext OpInfo} {parent : BlockPtr} {head : OperationPtr} {tail : List OperationPtr} :
+    BlockPtr.OpChainSlice ctx parent (head :: tail) ↔
+    head.InBounds ctx ∧
+    (head.get! ctx).parent = some parent ∧
+    (∀ b, tail.head? = some b → (head.get! ctx).next = some b) ∧
+    BlockPtr.OpChainSlice ctx parent tail := by
+  simp [BlockPtr.OpChainSlice]
+
+end BlockPtr.OpChainSlice
+
+/-- Get the successors of a block. This is defined as the successors of the terminator operation.
+In case the block has no terminator, this function returns an empty array. -/
+def BlockPtr.getSuccessors! (block : BlockPtr) (ctx : IRContext OpInfo) : Array BlockPtr :=
+  let term := (block.get! ctx).lastOp
+  match term with
+  | none => #[]
+  | some term => term.getSuccessors! ctx
+
+def IRContext.empty (OpInfo : Type) [IsOpCode OpInfo] : IRContext OpInfo := {
     nextID := 0,
     operations := Std.HashMap.emptyWithCapacity,
     blocks := Std.HashMap.emptyWithCapacity,

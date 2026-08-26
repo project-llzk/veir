@@ -1,14 +1,15 @@
 name = "VeIR"
 version = "0.1.0"
-defaultTargets = ["veir-opt", "veir-interpret", "run-benchmarks", "Veir"]
+defaultTargets = ["veir-opt", "veir-interpret", "run-benchmarks", "veir2mir", "Veir"]
 testRunner = "UnitTest"
+buildType = "release"
 moreLeanArgs = ["--tstack=400000"]
 moreServerArgs = ["--tstack=400000"]
 
 [[require]]
 name = "mathlib"
 scope = "leanprover-community"
-version = "git#8205572479d035c46e07ed4c9888745ca603e82c"
+version = "git#db584cd6d46c92f209a44c0f1c829460d327499d"
 
 [[require]]
 name = "ExArray"
@@ -33,3 +34,7 @@ root = "RunBenchmarks"
 [[lean_exe]]
 name = "veir-interpret"
 root = "VeirInterpret"
+
+[[lean_exe]]
+name = "veir2mir"
+root = "VeirToMIR"

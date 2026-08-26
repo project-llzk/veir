@@ -16,7 +16,7 @@ VeIR is a compiler infrastructure written in Lean that offers both an
 [MLIR](https://mlir.llvm.org/)-style imperative design and
 (optional) ITP-level verification.
 VeIR connects with MLIR via the MLIR textual format, making it
-easy to combine MLIR and VeIR tooling.
+easy to combine MLIR and VeIR tools.
 
 ## LLZK Companion Pin
 
@@ -47,41 +47,18 @@ Phase 9 and Phase 10 planning files live under [`docs/phases/`](docs/phases/).
 | peephole rewriter (declarative)                       |            |           |
 | interpreter framework                                 | ✅         |           |
 
-## Testing
+## Building and testing
+
+Common tasks are wrapped in the [`Makefile`](Makefile): `make build` to build and
+`make tests` to run the tests. Run `make` to list every target.
 
 Our testing framework is split into two parts: unit tests written in Lean and
 [FileCheck](https://llvm.org/docs/CommandGuide/FileCheck.html) tests for the
-command line tool `veir-opt`.
+command line tool `veir-opt`. The FileCheck tests require
+[uv](https://docs.astral.sh/uv/) to be installed.
 
-### Unit Tests
-
-Run the unit tests with:
-
-```bash
-lake test
-```
-
-### FileCheck Tests
-
-FileCheck tests require [uv](https://docs.astral.sh/uv/) to be installed.
-
-First, install dependencies:
-
-```bash
-uv sync
-```
-
-Then run the tests:
-
-```bash
-uv run lit Test/ -v
-```
-
-## Running the benchmarks
-
-```bash
-lake exe run-benchmarks add-fold-worklist
-```
+Run a single benchmark with `lake exe run-benchmarks <name>` (see
+[`Veir/Benchmarks.lean`](Veir/Benchmarks.lean) for the available names).
 
 ## From C to VeIR
 

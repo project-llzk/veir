@@ -1,2436 +1,277 @@
 module
 
-public import Veir.IR.Basic
-public import Veir.IR.Fields
-public import Veir.Properties
+public import Veir.Verifier.Lemmas
 public import Veir.GlobalOpInfo
-public import Veir.IR.WellFormed
-import Veir.ForLean
+public import Veir.Interfaces.FunctionInterfaces
+public import Veir.IRNesting
+public import Veir.Interfaces.RegionKindInterfaces
+public import Veir.IR.Dominance
+
+import all Veir.Verifier.Basic
+import all Veir.Dialects.LLVM.OpInfo
+import all Veir.Dialects.ModArith.OpInfo
 
 namespace Veir
 
-/--
-  Walk up from `op` (a return-like terminator named `opName`) to the
-  operation that encloses its parent region, i.e. the enclosing function
-  operation.
--/
-def OperationPtr.getEnclosingFunctionOp (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (opName : String) : Except String OperationPtr := do
-  let some block := (op.get! ctx.raw).parent
-    | throw s!"Expected {opName} to have a parent block"
-  let some region := (block.get! ctx.raw).parent
-    | throw s!"Expected {opName}'s parent block to have a parent region"
-  let some funcOp := (region.get! ctx.raw).parent
-    | throw s!"Expected {opName}'s parent region to have a parent operation"
-  pure funcOp
+variable {OpInfo : Type} [HasOpInfo OpInfo]
 
 /--
-  Check that a `func.return` returns the declared result types of its
-  enclosing `func.func`.
--/
-def OperationPtr.verifyFuncReturnTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (opIn : op.InBounds ctx.raw) : Except String PUnit := do
-  let funcOp ← op.getEnclosingFunctionOp ctx "func.return"
-  let .func .func := funcOp.getOpType! ctx.raw
-    | throw "Expected func.return to be enclosed by func.func"
-  let props := funcOp.getProperties! ctx.raw (.func .func)
-  let outputs ← match props.extra.entries.find? (fun entry => entry.1 == "function_type".toUTF8) with
-    | some (_, .functionType ft) => pure ft.outputs
-    | some _ => throw "Expected enclosing func.func's function_type to be a function type"
-    | none => throw "Expected enclosing func.func to have a function_type attribute"
-  if op.getNumOperands ctx.raw opIn ≠ outputs.size then
-    throw s!"Expected func.return to have {outputs.size} operand(s)"
-  let opTypes := op.getOperandTypes! ctx.raw
-  for i in [0:outputs.size] do
-    if (opTypes[i]!).val ≠ outputs[i]! then
-      throw s!"func.return operand {i} type does not match the function's declared result type"
-
-/--
-  Check that an `llvm.return` returns the declared result types of its
-  enclosing `llvm.func`. A single `llvm.void` result is normalized to no
-  results.
--/
-def OperationPtr.verifyLLVMReturnTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (opIn : op.InBounds ctx.raw) : Except String PUnit := do
-  let funcOp ← op.getEnclosingFunctionOp ctx "llvm.return"
-  let .llvm .func := funcOp.getOpType! ctx.raw
-    | throw "Expected llvm.return to be enclosed by llvm.func"
-  let props := funcOp.getProperties! ctx.raw (.llvm .func)
-  let some functionType := props.function_type
-    | throw "Expected enclosing llvm.func to have a function_type attribute"
-  let ft ← match functionType.val with
-    | .functionType ft | .llvmFunctionType ft => pure ft
-    | _ => throw "Expected enclosing llvm.func's function_type to be a function type"
-  -- A single `llvm.void` result corresponds to no return operands.
-  let outputs := match ft.outputs with
-    | #[.llvmVoidType _] => #[]
-    | outputs => outputs
-  if op.getNumOperands ctx.raw opIn ≠ outputs.size then
-    throw s!"Expected llvm.return to have {outputs.size} operand(s)"
-  let opTypes := op.getOperandTypes! ctx.raw
-  for i in [0:outputs.size] do
-    if (opTypes[i]!).val ≠ outputs[i]! then
-      throw s!"llvm.return operand {i} type does not match the function's declared result type"
-
-def TypeAttr.verifyIntegerType (ty : TypeAttr) (errMsg : String) : Except String PUnit :=
-  match ty.val with
-  | .integerType _ => pure ()
-  | _ => throw errMsg
-
-def TypeAttr.verifyIntegerOrPointerType (ty : TypeAttr) (errMsg : String) : Except String PUnit :=
-  match ty.val with
-  | .integerType _ => pure ()
-  | .llvmPointerType _ => pure ()
-  | _ => throw errMsg
-
-def TypeAttr.verifyI1 (ty : TypeAttr) (errMsg : String) : Except String PUnit :=
-  match ty.val with
-  | .integerType intType =>
-    if intType.bitwidth ≠ 1 then
-      throw errMsg
-    else
-      pure ()
-  | _ => throw errMsg
-
-def OperationPtr.verifyOperandTypesMatch (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (firstIdx secondIdx : Nat) (errMsg : String) : Except String TypeAttr := do
-  let firstType := (op.getOperand! ctx.raw firstIdx).getType! ctx.raw
-  let secondType := (op.getOperand! ctx.raw secondIdx).getType! ctx.raw
-  if secondType.val ≠ firstType.val then
-    throw errMsg
-  pure firstType
-
-def OperationPtr.verifyResultTypeMatches (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (expectedType : TypeAttr) (errMsg : String) : Except String PUnit := do
-  if ((op.getResult 0).get! ctx.raw).type.val ≠ expectedType.val then
-    throw errMsg
-
-def OperationPtr.verifyIntegerBinopTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (instrName : String) : Except String PUnit := do
-  ((op.getOperand! ctx.raw 0).getType! ctx.raw).verifyIntegerType s!"{instrName}: Expected operand 0 to have integer type"
-  ((op.getOperand! ctx.raw 1).getType! ctx.raw).verifyIntegerType s!"{instrName}: Expected operand 1 to have integer type"
-  let operandType ← op.verifyOperandTypesMatch ctx 0 1 s!"{instrName}: Expected operands to have the same type"
-  op.verifyResultTypeMatches ctx operandType s!"{instrName}: Expected result type to match operand type"
-
-def OperationPtr.verifyICmpTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (instrName : String) : Except String PUnit := do
-  ((op.getOperand! ctx.raw 0).getType! ctx.raw).verifyIntegerType s!"{instrName}: Expected operand 0 to have integer type"
-  ((op.getOperand! ctx.raw 1).getType! ctx.raw).verifyIntegerType s!"{instrName}: Expected operand 1 to have integer type"
-  let _ ← op.verifyOperandTypesMatch ctx 0 1 s!"{instrName}: Expected operands to have the same type"
-  ((op.getResult 0).get! ctx.raw).type.verifyI1 s!"{instrName}: Expected i1 result"
-
-def OperationPtr.verifyLLVMICmpTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (instrName : String) : Except String PUnit := do
-  -- `llvm.icmp` also compares pointers.
-  ((op.getOperand! ctx.raw 0).getType! ctx.raw).verifyIntegerOrPointerType
-    s!"{instrName}: Expected operand 0 to have integer or pointer type"
-  ((op.getOperand! ctx.raw 1).getType! ctx.raw).verifyIntegerOrPointerType
-    s!"{instrName}: Expected operand 1 to have integer or pointer type"
-  let _ ← op.verifyOperandTypesMatch ctx 0 1 s!"{instrName}: Expected operands to have the same type"
-  ((op.getResult 0).get! ctx.raw).type.verifyI1 s!"{instrName}: Expected i1 result"
-
-def OperationPtr.verifySelectTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (instrName : String) : Except String PUnit := do
-  ((op.getOperand! ctx.raw 0).getType! ctx.raw).verifyI1 s!"{instrName}: Expected i1 condition"
-  -- Both `arith.select` and `llvm.select` accept values of any type.
-  let operandType ← op.verifyOperandTypesMatch ctx 1 2 s!"{instrName}: Expected select values to have the same type"
-  op.verifyResultTypeMatches ctx operandType s!"{instrName}: Expected result type to match select value type"
-
-def OperationPtr.verifyIntegerTruncTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (instrName : String) : Except String PUnit := do
-  let operandType := (op.getOperand! ctx.raw 0).getType! ctx.raw
-  let resultType := ((op.getResult 0).get! ctx.raw).type
-  let .integerType operandInt := operandType.val
-    | throw s!"{instrName}: Expected operand 0 to have integer type"
-  let .integerType resultInt := resultType.val
-    | throw s!"{instrName}: Expected integer result type"
-  if operandInt.bitwidth ≤ resultInt.bitwidth then
-    throw s!"{instrName}: Result's width must be smaller than operand's width"
-  else
-    pure ()
-
-def OperationPtr.verifyIntegerExtTypes (op : OperationPtr) (ctx : WfIRContext OpCode)
-    (instrName : String) : Except String PUnit := do
-  let operandType := (op.getOperand! ctx.raw 0).getType! ctx.raw
-  let resultType := ((op.getResult 0).get! ctx.raw).type
-  let .integerType operandInt := operandType.val
-    | throw s!"{instrName}: Expected operand 0 to have integer type"
-  let .integerType resultInt := resultType.val
-    | throw s!"{instrName}: Expected integer result type"
-  if resultInt.bitwidth ≤ operandInt.bitwidth then
-    throw s!"{instrName}: Operand's width must be smaller than result's width"
-  else
-    pure ()
-
-/--
-  Verify local invariants of an operation.
-  This typically includes checking that the number of operands, successors, results, and regions
-  match the expected values for the given operation type.
-  This also checks that the given types are in bounds.
--/
-def OperationPtr.verifyLocalInvariants (op : OperationPtr) (ctx : WfIRContext OpCode) (opIn : op.InBounds ctx.raw) : Except String PUnit :=
-  match op.getOpType ctx.raw opIn with
-  | .builtin .unregistered => pure ()
-  | .builtin .unrealized_conversion_cast => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- ARITH -/
-  | .arith .addi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.addi"
-    pure ()
-  | .arith .addui_extended => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 2 then
-      throw "Expected 2 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .arith .andi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.andi"
-    pure ()
-  | .arith .ceildivsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.ceildivsi"
-    pure ()
-  | .arith .ceildivui => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.ceildivui"
-    pure ()
-  | .arith .cmpi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyICmpTypes ctx "arith.cmpi"
-    pure ()
-   | .arith .constant => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    else if _ : op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    else if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    else if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    else if (op.getProperties! ctx.raw (.arith .constant)).value.type ≠
-          ((op.getResult 0).get ctx.raw).type.val then
-        throw "Expected result type to be equal to the constant's type"
-    pure ()
-  | .arith .divsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.divsi"
-    pure ()
-  | .arith .divui => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.divui"
-    pure ()
-  | .arith .extui => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerExtTypes ctx "arith.extui"
-    pure ()
-  | .arith .extsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerExtTypes ctx "arith.extsi"
-    pure ()
-  | .arith .floordivsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.floordivsi"
-    pure ()
-  | .arith .maxsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.maxsi"
-    pure ()
-  | .arith .maxui => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.maxui"
-    pure ()
-  | .arith .minsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.minsi"
-    pure ()
-  | .arith .minui => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.minui"
-    pure ()
-  | .arith .muli => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.muli"
-    pure ()
-  | .arith .mulsi_extended => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 2 then
-      throw "Expected 2 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .arith .mului_extended => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 2 then
-      throw "Expected 2 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .arith .ori => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.ori"
-    pure ()
-  | .arith .remsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.remsi"
-    pure ()
-  | .arith .remui => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.remui"
-    pure ()
-  | .arith .select => do
-    if op.getNumOperands ctx.raw opIn ≠ 3 then
-      throw "Expected 3 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifySelectTypes ctx "arith.select"
-    pure ()
-  | .arith .shli => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.shli"
-    pure ()
-  | .arith .shrsi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.shrsi"
-    pure ()
-  | .arith .shrui => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.shrui"
-    pure ()
-  | .arith .subi => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.subi"
-    pure ()
-  | .arith .trunci => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerTruncTypes ctx "arith.trunci"
-    pure ()
-  | .arith .xori => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "arith.xori"
-    pure ()
-  | .builtin .module => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 1 then
-      throw "Expected 1 region"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .datapath .compress => do
-    if op.getNumOperands ctx.raw opIn ≤ op.getNumResults ctx.raw opIn then
-      throw "Number of inputs must be greater than the number of results"
-    if op.getNumResults ctx.raw opIn < 2 then
-      throw "Expected at least 2 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .datapath .partial_product => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .datapath .pos_partial_product => do
-    if op.getNumOperands ctx.raw opIn ≠ 3 then
-      throw "Expected 3 operands"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- FUNC -/
-  | .func .func => do
-    if op.getNumRegions ctx.raw opIn ≠ 1 then
-      throw "Expected 1 region"
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .func .call => do
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .func .return => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyFuncReturnTypes ctx opIn
-  /- CF -/
-  | .cf .br => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 1 then
-      throw "Expected 1 successor"
-    pure ()
-  | .cf .cond_br => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let weights := (op.getProperties! ctx.raw (OpCode.cf .cond_br)).branch_weights
-    if weights.values.size ≠ 2 && weights.values.size ≠ 0 then
-      throw "Expected 0 or 2 branch weights"
-    let sizes := (op.getProperties! ctx.raw (OpCode.cf .cond_br)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 3 then
-      throw "Expected 1 operand plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 then
-      throw "Expected 1 operand plus 2 variadic operands"
-    pure ()
-  /- TEST -/
-  | .test .test => do
-    pure ()
-  /- LLVM -/
-  | .llvm .mlir__constant => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    -- Unlike `arith.constant`, `llvm.mlir.constant` does not require the value
-    -- attribute's type to match the result type exactly. An integer attribute
-    -- only requires an integer result type of any width (e.g. a boolean constant
-    -- may be written with a wider integer attribute). A float attribute requires
-    -- a same-width float result, or a same-width integer result (the workaround
-    -- for builtin MLIR float types without an LLVM equivalent).
-    let resultType := ((op.getResult 0).get! ctx.raw).type.val
-    match (op.getProperties! ctx.raw (.llvm .mlir__constant)).value with
-    | .integer _ =>
-      match resultType with
-      | .integerType _ => pure ()
-      | _ => throw "llvm.mlir.constant: Expected integer result type for an integer constant"
-    | .float floatAttr =>
-      match resultType with
-      | .floatType floatType =>
-        if floatType.bitwidth ≠ floatAttr.type.bitwidth then
-          throw s!"llvm.mlir.constant: Expected float result type with bitwidth {floatAttr.type.bitwidth}"
-      | .integerType intType =>
-        if intType.bitwidth ≠ floatAttr.type.bitwidth then
-          throw s!"llvm.mlir.constant: Expected integer result type with bitwidth {floatAttr.type.bitwidth}"
-      | _ => throw "llvm.mlir.constant: Expected float or integer result type for a float constant"
-    pure ()
-  | .llvm .and => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.and"
-    pure ()
-  | .llvm .or => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.or"
-    pure ()
-  | .llvm .xor => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.xor"
-    pure ()
-  | .llvm .add => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.add"
-    pure ()
-  | .llvm .sub => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.sub"
-    pure ()
-  | .llvm .shl => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.shl"
-    pure ()
-  | .llvm .lshr => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.lshr"
-    pure ()
-  | .llvm .ashr => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.ashr"
-    pure ()
-  | .llvm .mul => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.mul"
-    pure ()
-  | .llvm .sdiv => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.sdiv"
-    pure ()
-  | .llvm .udiv => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.udiv"
-    pure ()
-  | .llvm .srem => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.srem"
-    pure ()
-  | .llvm .urem => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerBinopTypes ctx "llvm.urem"
-    pure ()
-  | .llvm .icmp => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyLLVMICmpTypes ctx "llvm.icmp"
-    pure ()
-  | .llvm .select => do
-    if op.getNumOperands ctx.raw opIn ≠ 3 then
-      throw "Expected 3 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifySelectTypes ctx "llvm.select"
-    pure ()
-  | .llvm .trunc => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerTruncTypes ctx "llvm.trunc"
-    pure ()
-  | .llvm .sext => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerExtTypes ctx "llvm.sext"
-    pure ()
-  | .llvm .zext => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyIntegerExtTypes ctx "llvm.zext"
-    pure ()
-  | .llvm .return => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyLLVMReturnTypes ctx opIn
-  | .llvm .unreachable => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .llvm .br => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 1 then
-      throw "Expected 1 successor"
-    pure ()
-  | .llvm .cond_br => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let weights := (op.getProperties! ctx.raw (.llvm .cond_br)).branch_weights
-    if weights.values.size ≠ 2 && weights.values.size ≠ 0 then
-      throw "Expected 0 or 2 branch weights"
-    let sizes := (op.getProperties! ctx.raw (.llvm .cond_br)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 3 then
-      throw "Expected 1 operand plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 then
-      throw "Expected 1 operand plus 2 variadic operands"
-    pure ()
-  | .llvm .alloca => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    let properties := (op.getProperties! ctx.raw (.llvm .alloca))
-    if properties.alignment.type.bitwidth ≠ 64 then
-      throw "'llvm.alloca' op attribute 'alignment' failed to satisfy constraint: 64-bit signless integer attribute"
-
-    pure ()
-  | .llvm .load => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    let properties := (op.getProperties! ctx.raw (.llvm .load))
-    if properties.alignment.type.bitwidth ≠ 64 then
-      throw "'llvm.load' op attribute 'alignment' failed to satisfy constraint: 64-bit signless integer attribute"
-
-    pure ()
-  | .llvm .store => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    let properties := (op.getProperties! ctx.raw (.llvm .store))
-    if properties.alignment.type.bitwidth ≠ 64 then
-      throw "'llvm.store' op attribute 'alignment' failed to satisfy constraint: 64-bit signless integer attribute"
-    pure ()
-  | .llvm .getelementptr => do
-    let props := op.getProperties! ctx.raw (.llvm .getelementptr)
-    let dynamicCount := props.rawConstantIndices.values.filter (· == -2147483648) |>.size
-    if op.getNumOperands ctx.raw opIn ≠ 1 + dynamicCount then
-      throw s!"Expected {1 + dynamicCount} operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .llvm .call => do
-    if op.getNumResults ctx.raw opIn > 1 then
-      throw "Expected at most 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .llvm .func => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 1 then
-      throw "Expected 1 region"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .llvm .fadd | .llvm .fsub | .llvm .fmul | .llvm .fdiv | .llvm .frem => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .llvm .module_flags => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .llvm .freeze => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    op.verifyResultTypeMatches ctx ((op.getOperand! ctx.raw 0).getType! ctx.raw)
-      "llvm.freeze: Expected result type to match operand type"
-    pure ()
-  /- MOD_ARITH -/
-  | .mod_arith .add => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .mod_arith .constant => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .mod_arith .mul => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .mod_arith .sub => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- FELT -/
-  | .felt .const => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .felt .add | .felt .sub | .felt .mul | .felt .pow | .felt .div
-  | .felt .uintdiv | .felt .sintdiv | .felt .umod | .felt .smod
-  | .felt .bit_and | .felt .bit_or | .felt .bit_xor
-  | .felt .shl | .felt .shr => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .felt .neg | .felt .inv | .felt .bit_not => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- STRING -/
-  | .string .new => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- INCLUDE -/
-  | .include .«from» => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- RAM -/
-  | .ram .load => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .ram .store => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- CAST -/
-  | .cast .tofelt | .cast .toindex => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- BOOL -/
-  | .bool .and | .bool .or | .bool .xor => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .bool .not => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .bool .assert => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .bool .cmp => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- CONSTRAIN -/
-  | .constrain .eq => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- GLOBAL -/
-  | .global .«def» => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .global .read => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .global .write => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- FUNCTION (Phase F.5) -/
-  | .function .«def» => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 1 then
-      throw "Expected 1 region (the function body)"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .function .return => do
-    -- Variadic operands — no operand-count check
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- RISCV -/
-  | .riscv .li => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .lui => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .auipc => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .addi => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .slti => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sltiu => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .andi => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .ori => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .xori => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .addiw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .slli => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .srli => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .srai => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .add => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sub => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sll => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .slt => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sltu => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .xor => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .srl => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sra => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .or => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .and => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .slliw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .srliw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sraiw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .addw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .subw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sllw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .srlw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sraw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .rem => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .remu => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .remw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .remuw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .mul => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .mulh => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .mulhu => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .mulhsu => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .mulw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .div => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .divw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .divu => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .divuw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .adduw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sh1adduw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sh2adduw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sh3adduw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sh1add => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sh2add => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sh3add => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .slliuw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .andn => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .orn => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .xnor => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .max => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .maxu => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .min => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .minu => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .rol => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .ror => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .rolw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .rorw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sextb => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sexth => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .zexth => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .clz => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .clzw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .ctz => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .ctzw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .cpop => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .cpopw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .orcb => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .rev8 => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .roriw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .rori => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .bclr => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .bext => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .binv => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .bset => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .bclri => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .bexti => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .binvi => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .bseti => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .pack => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .packh => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .packw => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .ld => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sd | .riscv .sw | .riscv .sh | .riscv .sb => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .mv => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .not => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .neg => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .negw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sextw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .zextb => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .zextw => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .seqz => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .snez => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sltz => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .riscv .sgtz => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- RISCV CF -/
-  | .riscv_cf .branch => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 1 then
-      throw "Expected 1 successor"
-    pure ()
-  | .riscv_cf .beq => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let sizes := (op.getProperties! ctx.raw (OpCode.riscv_cf .beq)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 4 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 || sizes.values[1]! ≠ 1 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    pure ()
-  | .riscv_cf .bne => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let sizes := (op.getProperties! ctx.raw (OpCode.riscv_cf .bne)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 4 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 || sizes.values[1]! ≠ 1 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    pure ()
-  | .riscv_cf .blt => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let sizes := (op.getProperties! ctx.raw (OpCode.riscv_cf .blt)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 4 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 || sizes.values[1]! ≠ 1 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    pure ()
-  | .riscv_cf .bge => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let sizes := (op.getProperties! ctx.raw (OpCode.riscv_cf .bge)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 4 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 || sizes.values[1]! ≠ 1 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    pure ()
-  | .riscv_cf .bltu => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let sizes := (op.getProperties! ctx.raw (OpCode.riscv_cf .bltu)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 4 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 || sizes.values[1]! ≠ 1 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    pure ()
-  | .riscv_cf .bgeu => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 2 then
-      throw "Expected 2 successors"
-    let sizes := (op.getProperties! ctx.raw (OpCode.riscv_cf .bgeu)).operandSegmentSizes
-    if _ : sizes.values.size ≠ 4 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    if sizes.values[0]! ≠ 1 || sizes.values[1]! ≠ 1 then
-      throw "Expected 2 operands plus 2 variadic operands"
-    pure ()
-  /- RISCV Stack -/
-  | .riscv_stack .alloca => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- Comb -/
-  | .comb .add | .comb .and | .comb .mul | .comb .or | .comb .xor => do
-    if op.getNumOperands ctx.raw opIn < 1 then
-      throw "Expected 1 or more operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .comb .concat => do
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .comb .divs | .comb .divu | .comb .icmp | .comb .mods | .comb .modu | .comb .shl
-  | .comb .shrs | .comb .shru | .comb .sub => do
-    if op.getNumOperands ctx.raw opIn ≠ 2 then
-      throw "Expected 2 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .comb .extract | .comb .parity | .comb .replicate | .comb .reverse => do
-    if op.getNumOperands ctx.raw opIn ≠ 1 then
-      throw "Expected 1 operand"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .comb .mux => do
-    if op.getNumOperands ctx.raw opIn ≠ 3 then
-      throw "Expected 3 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  /- HW -/
-  | .hw .constant => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 1 then
-      throw "Expected 1 result"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .hw .module => do
-    if op.getNumOperands ctx.raw opIn ≠ 0 then
-      throw "Expected 0 operands"
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 1 then
-      throw "Expected 1 region"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-  | .hw .output => do
-    if op.getNumResults ctx.raw opIn ≠ 0 then
-      throw "Expected 0 results"
-    if op.getNumRegions ctx.raw opIn ≠ 0 then
-      throw "Expected 0 regions"
-    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
-      throw "Expected 0 successors"
-    pure ()
-
-/--
-  Return the kind of this region.
--/
-def RegionPtr.getRegionKind (region : RegionPtr) (ctx : WfIRContext OpCode) : RegionKind :=
-  match (region.get! ctx.raw).parent with
-  | some parentOp =>
-    let parent := parentOp.get! ctx.raw
-    parent.opType.getRegionKind (parent.regions.idxOf region)
-  | none => .SSACFG
-
-/--
-  Verify that a terminator only ever appears as the last operation of its block:
-  an operation that is a terminator must not be followed by another operation.
+  Verify operation/block control-flow position rules: a terminator
+  only ever appears as the last operation of its block, and any
+  operation carrying block successors must also be the last operation
+  of its block. The second rule is MLIR's, from
+  `verifyOnEntrance(Block &)` in `mlir/lib/IR/Verifier.cpp`.
 -/
 def OperationPtr.verifyTerminatorPosition (op : OperationPtr) (ctx : WfIRContext OpCode)
     (opIn : op.InBounds ctx.raw) : Except String PUnit := do
   let operation := op.get ctx.raw opIn
   if operation.opType.isTerminator && operation.next.isSome then
     throw "Expected a terminator to be the last operation of its block"
+  if op.getNumSuccessors ctx.raw opIn ≠ 0 && operation.next.isSome then
+    throw "operation with block successors must terminate its parent block"
 
 /--
-  Check that a block is non-empty and its last operation is a
-  terminator.
+Verify MLIR's `IsolatedFromAbove` rule for one operation's operands. A use in
+an isolated operation's region may only reference a value defined in that same
+region or one of its nested regions. Looking for the nearest isolated scope
+also mirrors MLIR's behavior of checking nested isolated operations
+independently.
+-/
+def OperationPtr.verifyOperandIsolation
+    (op : OperationPtr) (ctx : WfIRContext OpCode)
+    (opIn : op.InBounds ctx.raw) : Except String PUnit := do
+  if op.getNumOperands ctx.raw opIn == 0 then return
+  let some useRegion := op.getParentRegion! ctx.raw | return
+  let escaping := (op.getOperands ctx.raw opIn).filter
+    (·.getParentRegion! ctx.raw != some useRegion)
+  if escaping.isEmpty then return
+  let some isolatedScope := useRegion.nearestIsolatedScope? ctx.raw | return
+  for value in escaping do
+    let some defRegion := value.getParentRegion! ctx.raw
+      | throw "operand is unlinked from any region"
+    if !isolatedScope.isAncestorOf defRegion ctx then
+      throw "operand uses a value defined outside the isolated region that encloses its use"
+
+/--
+  Whether a block is exempt from the requirement that it end in a terminator,
+  mirroring `mayBeValidWithoutTerminator` in `mlir/lib/IR/Verifier.cpp`.
+-/
+def BlockPtr.mayBeValidWithoutTerminator (block : BlockPtr) (ctx : WfIRContext OpCode)
+    (blockIn : block.InBounds ctx.raw) : Bool :=
+  match (block.get ctx.raw blockIn).parent with
+  | none => true
+  | some region =>
+    (region.get! ctx.raw).firstBlock = some block &&
+    (block.get ctx.raw blockIn).next.isNone &&
+    match (region.get! ctx.raw).parent with
+    | none => true
+    | some _ => region.hasNoTerminator ctx
+
+/--
+  Check that a block is non-empty and ends in an operation that might be a
+  terminator, unless the block may be valid without one. Mirrors the terminator
+  half of `verifyOnEntrance`/`verifyOnExit` in `mlir/lib/IR/Verifier.cpp`.
 -/
 def BlockPtr.verifyTerminator (block : BlockPtr) (ctx : WfIRContext OpCode)
     (blockIn : block.InBounds ctx.raw) : Except String PUnit := do
+  if block.mayBeValidWithoutTerminator ctx blockIn then
+    return
   let b := block.get ctx.raw blockIn
+  let named (msg : String) : String :=
+    match b.parent with
+    | some region =>
+      match (region.get! ctx.raw).parent with
+      | some parentOp => s!"{String.fromUTF8! (parentOp.getOpType! ctx.raw).name}: {msg}"
+      | none => msg
+    | none => msg
   match b.lastOp with
-  | none => throw "Expected the block to end in a terminator, but the block is empty"
+  | none => throw (named "Expected the block to end in a terminator, but the block is empty")
   | some lastOp =>
     if !(lastOp.getOpType! ctx.raw).isTerminator then
-      throw "Expected the last operation of a block to be a terminator"
+      throw (named "Expected the last operation of a block to be a terminator")
+
+/--
+  Verify that the entry block of a region has no predecessors. A region is
+  entered exclusively through its entry block, and both the entry block's
+  arguments and dominance treat it as unconditionally reaching every other
+  block in the region. A branch back to it would contradict that.
+-/
+def BlockPtr.verifyNoEntryBlockPredecessors (block : BlockPtr) (ctx : WfIRContext OpCode)
+    (blockIn : block.InBounds ctx.raw) : Except String PUnit := do
+  let b := block.get ctx.raw blockIn
+  let some parent := b.parent | return
+  if (parent.get! ctx.raw).firstBlock ≠ some block then return
+  if b.firstUse.isSome then
+    throw "entry block of region may not have predecessors"
+
+/-- Check that a graph region contains at most one block. -/
+private def WfIRContext.graphRegionsHaveAtMostOneBlock (ctx : WfIRContext OpCode) : Bool :=
+  ctx.raw.regions.keys.all fun region =>
+    if !region.hasSSADominance ctx then
+      let body := region.get! ctx.raw
+      body.firstBlock = body.lastBlock
+    else
+      true
+
+/--
+  Check the module-wide invariants needed by LLVM global references: global
+  names are unique and every `llvm.mlir.addressof` names a declared global.
+
+  TODO: This is stricter than MLIR, which lets `llvm.mlir.addressof` name either
+  an `llvm.mlir.global` or an `llvm.func`, so taking the address of a function
+  (function pointers, vtables, globals initialized with a function address) is
+  currently rejected.
+-/
+private def WfIRContext.verifyLLVMGlobalSymbols (ctx : WfIRContext OpCode) :
+    Except String Unit := do
+  let mut globals : Std.HashMap ByteArray OperationPtr := Std.HashMap.emptyWithCapacity
+  for op in ctx.raw.operations.keys do
+    if op.getOpType! ctx.raw = .llvm .mlir__global then
+      let props := op.getProperties! ctx.raw Llvm.mlir__global
+      let symbolName := "@".toUTF8 ++ props.sym_name.value
+      if globals.contains symbolName then
+        let displayName := String.fromUTF8? symbolName |>.getD "<non-UTF8 global symbol>"
+        throw s!"llvm.mlir.global: duplicate global symbol '{displayName}'"
+      globals := globals.insert symbolName op
+  for op in ctx.raw.operations.keys do
+    if op.getOpType! ctx.raw = .llvm .mlir__addressof then
+      let props := op.getProperties! ctx.raw Llvm.mlir__addressof
+      if !globals.contains props.global_name.value.toUTF8 then
+        throw s!"llvm.mlir.addressof: symbol '{props.global_name.value}' does not name an llvm.mlir.global"
+
+/--
+  Check the whole-pattern invariants that MLIR verifies in
+  `PatternOp::verifyRegions`: a `pdl.pattern` body holds only `pdl` operations,
+  and contains at least one `pdl.operation`.
+-/
+private def WfIRContext.verifyPDLPatternBodies (ctx : WfIRContext OpCode) :
+    Except String Unit := do
+  let mut patternHasOperation : Std.HashMap OperationPtr Bool := Std.HashMap.emptyWithCapacity
+  for op in ctx.raw.operations.keys do
+    if op.getOpType! ctx.raw = .pdl .pattern then
+      patternHasOperation := patternHasOperation.insert op false
+  for op in ctx.raw.operations.keys do
+    match op.getParentOp! ctx.raw with
+    | some parent =>
+      /- The body of a `pdl.pattern` and the body of the `pdl.rewrite` that
+         terminates it both belong to the pattern. -/
+      let parentType := parent.getOpType! ctx.raw
+      if parentType = .pdl .pattern || parentType = .pdl .rewrite then
+        let opType := op.getOpType! ctx.raw
+        let .pdl pdlOp := opType
+          | throw s!"pdl.pattern: expected only `pdl` operations within the pattern body, but got '{String.fromUTF8! opType.name}'"
+        if pdlOp = .operation && parentType = .pdl .pattern then
+          patternHasOperation := patternHasOperation.insert parent true
+    | none => pure ()
+  for (_, hasOperation) in patternHasOperation.toArray do
+    if !hasOperation then
+      throw "pdl.pattern: the pattern must contain at least one `pdl.operation`"
+
+/--
+  Verify SSA dominance of operand uses.
+
+  Two kinds of operation are skipped, as in MLIR. Operations in a graph region
+  are unordered with respect to their definitions, and operations in a block
+  that is unreachable from its region's entry have no meaningful dominance
+  relation. Nested regions of a skipped operation are still checked.
+-/
+private def WfIRContext.verifyDominance
+    (ctx : WfIRContext OpCode) (root : OperationPtr) : Except String Unit := do
+  let some dfCtx := Veir.fixpointSolve root #[DominanceAnalysis] ctx
+    | throw "dominance analysis did not reach a fixpoint"
+  ctx.raw.forOpsDepM fun op opIn => do
+    let some block := (op.get ctx.raw opIn).parent | return
+    if !block.isReachable dfCtx then return
+    let some region := (block.get! ctx.raw).parent | return
+    if !region.hasSSADominance ctx then return
+    for (value, index) in (op.getOperands ctx.raw opIn).zipIdx do
+      if !value.properlyDominatesUse op dfCtx ctx then
+        let opName := String.fromUTF8! (op.getOpType ctx.raw opIn).name
+        throw s!"{opName}: operand #{index} does not dominate this use"
 
 public section
 
 /--
-  Verify that all operations in the IRContext satisfy their local invariants.
+Verify the structural invariants of the IR context, the local invariants of all
+its operations, and SSA dominance in the operation tree rooted at `root`.
 -/
-def WfIRContext.verify (ctx : WfIRContext OpCode) : Except String Unit := do
+def WfIRContext.verify
+    (ctx : WfIRContext OpCode) (root : OperationPtr) : Except String Unit := do
+  if !ctx.successorsHaveSameParent then
+    throw "Block successors must belong to the same region as their predecessor"
+  if !ctx.graphRegionsHaveAtMostOneBlock then
+    throw "Graph regions may contain at most one block"
   ctx.raw.forOpsDepM (fun op opIn => do
-    op.verifyLocalInvariants ctx opIn
-    match (op.get ctx.raw opIn).parent with
-    | some _ => op.verifyTerminatorPosition ctx opIn
-    | none => pure ())
+    let opType := op.getOpType ctx.raw opIn
+    let opName := String.fromUTF8! opType.name
+    Except.mapError
+      (fun msg => if opName.isEmpty || msg.startsWith opName then msg else s!"{opName}: {msg}")
+      (do
+        op.verifyLocalInvariants ctx opIn
+        match (op.get ctx.raw opIn).parent with
+        | some _ => op.verifyTerminatorPosition ctx opIn
+        | none => pure ()
+        op.verifyOperandIsolation ctx opIn))
   ctx.raw.forBlocksDepM (fun block blockIn => do
-    match (block.get ctx.raw blockIn).parent with
-    | some region =>
-      if region.getRegionKind ctx = .SSACFG then
-        block.verifyTerminator ctx blockIn
-    | none => pure ())
+    block.verifyTerminator ctx blockIn
+    block.verifyNoEntryBlockPredecessors ctx blockIn)
+  ctx.verifyLLVMGlobalSymbols
+  ctx.verifyPDLPatternBodies
+  ctx.verifyDominance root
+
+attribute [simp] OpCode.verifyLocalInvariants HasOpInfo.verifyLocalInvariants
+  OperationPtr.verifyLocalInvariants
+  Llvm.verifyLocalInvariants Arith.verifyLocalInvariants Mod_Arith.verifyLocalInvariants
 
 /--
-Assert that all operations in the IRContext satisfy their local invariants.
+Assert that the IR context verifies successfully with `root` as the root operation.
 -/
-def WfIRContext.Verified (ctx : WfIRContext OpCode) : Prop :=
-  ctx.verify = .ok ()
+def WfIRContext.Verified (ctx : WfIRContext OpCode) (root : OperationPtr) : Prop :=
+  ctx.verify root = .ok ()
+
+/-- A verified context satisfies the same-parent successor check. -/
+private theorem WfIRContext.Verified.successorsHaveSameParent
+    {ctx : WfIRContext OpCode} {root : OperationPtr} (ctxVerified : ctx.Verified root) :
+    ctx.successorsHaveSameParent := by
+  simp only [WfIRContext.Verified, WfIRContext.verify] at ctxVerified
+  split at ctxVerified
+  · trivial
+  · grind
+
+/-- Every successor of a block in a verified context belongs to the block's parent region. -/
+@[grind →]
+theorem WfIRContext.Verified.successor_parent
+    {ctx : WfIRContext OpCode} {root : OperationPtr} (ctxVerified : ctx.Verified root)
+    {source : BlockPtr} (sourceIn : source.InBounds ctx.raw)
+    (hsourceParent : (source.get! ctx.raw).parent = some region)
+    (hsuccessor : successor ∈ source.getSuccessors! ctx.raw) :
+    (successor.get! ctx.raw).parent = some region := by
+  have hcheck := ctxVerified.successorsHaveSameParent
+  have hsourceKeys : source ∈ ctx.raw.blocks.keys := by grind [source.inBounds_def]
+  grind [Array.getElem_of_mem hsuccessor, (List.all_eq_true.mp hcheck) source hsourceKeys]
+
+/-- A verified context satisfies the single-block graph-region check. -/
+private theorem WfIRContext.Verified.graphRegionsHaveAtMostOneBlock
+    {ctx : WfIRContext OpCode} {root : OperationPtr} (ctxVerified : ctx.Verified root) :
+    ctx.graphRegionsHaveAtMostOneBlock := by
+  simp only [WfIRContext.Verified, WfIRContext.verify] at ctxVerified
+  split at ctxVerified
+  · trivial
+  · split at ctxVerified
+    · trivial
+    · grind
+
+/-- The first and last block of a graph region in a verified context are the same. -/
+@[grind →]
+theorem WfIRContext.Verified.graph_region_firstBlock_eq_lastBlock
+    {ctx : WfIRContext OpCode} {root : OperationPtr} (ctxVerified : ctx.Verified root)
+    {region : RegionPtr} (regionIn : region.InBounds ctx.raw)
+    (hregionKind : ¬ region.hasSSADominance ctx) :
+    (region.get! ctx.raw).firstBlock = (region.get! ctx.raw).lastBlock := by
+  have hcheck := ctxVerified.graphRegionsHaveAtMostOneBlock
+  have hregionKeys : region ∈ ctx.raw.regions.keys := by grind [region.inBounds_def]
+  have hregionCheck := (List.all_eq_true.mp hcheck) region hregionKeys
+  grind
 
 /--
 Assert that a given operation satisfies its local invariants.
@@ -2439,15 +280,14 @@ def OperationPtr.Verified (ctx : WfIRContext OpCode) (op : OperationPtr)
     (opInBounds : op.InBounds ctx.raw := by grind) : Prop :=
   op.verifyLocalInvariants ctx opInBounds = .ok ()
 
-set_option warn.sorry false in
 /--
 If the context satisfies the invariants of all operations, any operation in bounds is verified.
 -/
 @[grind →]
-theorem OperationPtr.satisfyInvariants_of_IRContext_satisfyOpInvariants {ctx : WfIRContext OpCode} {op : OperationPtr}
-    (ctxVerify : ctx.Verified) (opInBounds : op.InBounds ctx.raw := by grind) :
-    op.Verified ctx opInBounds := by
-  sorry -- This requires to reason about `IRContext.forOpsDepM`.
+axiom OperationPtr.satisfyInvariants_of_IRContext_satisfyOpInvariants {ctx : WfIRContext OpCode}
+    {op root : OperationPtr} (ctxVerify : ctx.Verified root)
+    (opInBounds : op.InBounds ctx.raw := by grind) :
+    op.Verified ctx opInBounds
 
 /-!
 ## Lemmas for verified operations
@@ -2457,6 +297,23 @@ There is one lemma per operation, and they are all of the same form: given that 
 satisfies its local invariants, we can conclude that it has the expected number of operands,
 results, regions, and successors, and that the types of its operands and results are as expected.
 -/
+/--
+  Reduce a verified integer binary operation to a successful `verifyIntegerBinop` check.
+  The hypothesis `armReduces` says the operation's local-invariant check is exactly the
+  `verifyIntegerBinop` arm; it is discharged per operation by unfolding the dispatcher at the
+  concrete opcode.
+-/
+private theorem OperationPtr.verifyIntegerBinop_ok_of_Verified {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyIntegerBinop ctx opInBounds >>= fun _ => pure ())) :
+    op.verifyIntegerBinop ctx opInBounds = .ok () := by
+  rw [Verified, armReduces] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  cases hb : op.verifyIntegerBinop ctx opInBounds with
+  | ok u => rfl
+  | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
 
 theorem OperationPtr.Verified.arith_constant {op : OperationPtr} {opInBounds}
     (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .constant) :
@@ -2465,28 +322,656 @@ theorem OperationPtr.Verified.arith_constant {op : OperationPtr} {opInBounds}
     op.getNumSuccessors! ctx.raw = 0 ∧
     op.getNumRegions! ctx.raw = 0 ∧
     ((op.getResult 0).get! ctx.raw).type =
-      ⟨(op.getProperties! ctx.raw (.arith .constant)).value.type, (by grind)⟩ := by
-  simp only [Verified, verifyLocalInvariants, ← getOpType!_eq_getOpType, opType, ne_eq,
+      Attribute.asType (op.getProperties! ctx.raw Arith.constant).value.type (by grind) := by
+  simp only [Verified, verifyLocalInvariants, HasOpInfo.verifyLocalInvariants,
+    OpCode.verifyLocalInvariants, Arith.verifyLocalInvariants,
+    ← getOpType!_eq_getOpType, opType, ne_eq,
     bind, Except.bind, throw, throwThe, MonadExceptOf.throw, pure, Except.pure, dite_not,
     ite_not] at opVerify
   simp only [TypeAttr.inj]
   grind
 
+/-- A verified `llvm.mlir.constant` whose value attribute is an integer has an integer result type. -/
+theorem OperationPtr.Verified.llvm_mlir__constant_resultType {op : OperationPtr} {opInBounds}
+    {intAttr : IntegerAttr}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .mlir__constant)
+    (hProp : (op.getProperties! ctx.raw Llvm.mlir__constant).value = .integer intAttr) :
+    ∃ intTy : IntegerType, ((op.getResult 0).get! ctx.raw).type.val = .integerType intTy := by
+  rw [Verified] at opVerify
+  simp only [verifyLocalInvariants, HasOpInfo.verifyLocalInvariants,
+    OpCode.verifyLocalInvariants, Llvm.verifyLocalInvariants,
+    ← getOpType!_eq_getOpType, opType] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  simp only [verifyPlainOpCounts, hProp, ne_eq, bind, Except.bind, throw, throwThe,
+    MonadExceptOf.throw, pure, Except.pure] at opVerify
+  cases hty : ((op.getResult 0).get! ctx.raw).type.val with
+  | integerType intTy => exact ⟨intTy, rfl⟩
+  | _ =>
+    rw [hty] at opVerify
+    split at opVerify <;> simp_all [reduceCtorEq]
+
+/--
+  The structural facts shared by every verified `llvm.icmp`: exactly 2 operands and 1 result, no
+  regions or successors, an `i1` result, and the two operands share a single type. Unlike
+  `IsVerifiedIntegerBinop`, the operands need not be integers (`llvm.icmp` also compares pointers),
+  so only their mutual equality is recorded.
+-/
+def OperationPtr.IsVerifiedIcmp (op : OperationPtr) (ctx : WfIRContext OpCode) : Prop :=
+  op.getNumResults! ctx.raw = 1 ∧
+  op.getNumOperands! ctx.raw = 2 ∧
+  op.getNumSuccessors! ctx.raw = 0 ∧
+  op.getNumRegions! ctx.raw = 0 ∧
+  (∃ i1ty : IntegerType,
+    ((op.getResult 0).get! ctx.raw).type.val = .integerType i1ty ∧ i1ty.bitwidth = 1) ∧
+  ((op.getOperand! ctx.raw 0).getType! ctx.raw).val
+    = ((op.getOperand! ctx.raw 1).getType! ctx.raw).val
+
+/-- Structural facts extracted from a successful `verifyLLVMICmp` check. -/
+private theorem OperationPtr.verifyLLVMICmp_eq_ok {ctx : WfIRContext OpCode} {op : OperationPtr}
+    {opInBounds : op.InBounds ctx.raw} (h : op.verifyLLVMICmp ctx opInBounds = .ok ()) :
+    op.IsVerifiedIcmp ctx := by
+  simp only [IsVerifiedIcmp, verifyLLVMICmp, verifyPlainOpCounts, verifyOperandTypesMatch,
+    TypeAttr.verifyIntegerOrPointerType, TypeAttr.verifyI1, ne_eq, bind, Except.bind, throw,
+    throwThe, MonadExceptOf.throw, pure, Except.pure] at h ⊢
+  split at h <;> (try split at h) <;> (try split at h) <;> (try split at h) <;> grind
+
+private theorem OperationPtr.verifyLLVMICmp_ok_of_Verified {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyLLVMICmp ctx opInBounds >>= fun _ => pure ())) :
+    op.verifyLLVMICmp ctx opInBounds = .ok () := by
+  rw [Verified, armReduces] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  cases hb : op.verifyLLVMICmp ctx opInBounds with
+  | ok u => rfl
+  | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+
+/-- Structural facts from the verifier for a verified `llvm.icmp`. -/
+theorem OperationPtr.Verified.llvm_icmp {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .icmp) :
+    op.IsVerifiedIcmp ctx :=
+  op.verifyLLVMICmp_eq_ok <| op.verifyLLVMICmp_ok_of_Verified opVerify <| by
+    simp [OperationPtr.verifyLocalInvariants, ← getOpType!_eq_getOpType, opType]
+
+/--
+  Every integer binary operation's `Verified.*` lemma: given that the operation is verified and
+  has the given binary-operation opcode, it satisfies `IsVerifiedIntegerBinop`. Each is a thin
+  wrapper that reduces `op.Verified` to a successful `verifyIntegerBinop` and applies the
+  workhorse `verifyIntegerBinop_eq_ok`.
+-/
+private theorem OperationPtr.Verified.integerBinop {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyIntegerBinop ctx opInBounds >>= fun _ => pure ())) :
+    op.IsVerifiedIntegerBinop ctx :=
+  op.verifyIntegerBinop_eq_ok <| op.verifyIntegerBinop_ok_of_Verified opVerify armReduces
+private theorem OperationPtr.verifySelectTypes_ok_of_Verified {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifySelectTypes ctx opInBounds >>= fun _ => pure ())) :
+    op.verifySelectTypes ctx opInBounds = .ok () := by
+  rw [Verified, armReduces] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  cases hb : op.verifySelectTypes ctx opInBounds with
+  | ok u => rfl
+  | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+
+theorem OperationPtr.Verified.llvm_select {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .select) :
+    op.IsVerifiedSelect ctx :=
+  op.verifySelectTypes_eq_ok <| op.verifySelectTypes_ok_of_Verified opVerify <| by
+    simp [← getOpType!_eq_getOpType, opType]
+
+/--
+  Structural facts guaranteed by a successful `verifyLLVMShift` check. Unlike `IsVerifiedIntegerBinop`
+  it does *not* pin the two operands to the same type: `verifyLLVMShift` only requires the shift
+  amount (operand 1) to be an integer, and the result to match operand 0 (which may be an integer or
+  a byte). The equality of the two operand widths is a *dynamic* fact recovered from a successful
+  interpretation, not a static one.
+-/
+def OperationPtr.IsVerifiedLLVMShift (op : OperationPtr) (ctx : WfIRContext OpCode) : Prop :=
+  op.getNumResults! ctx.raw = 1 ∧
+  op.getNumOperands! ctx.raw = 2 ∧
+  ((op.getResult 0).get! ctx.raw).type.val = ((op.getOperand! ctx.raw 0).getType! ctx.raw).val ∧
+  ∃ intType, ((op.getOperand! ctx.raw 1).getType! ctx.raw).val = .integerType intType
+
+private theorem OperationPtr.verifyLLVMShift_eq_ok {ctx : WfIRContext OpCode} {op : OperationPtr}
+    {opInBounds : op.InBounds ctx.raw} (h : op.verifyLLVMShift ctx opInBounds = .ok ()) :
+    op.IsVerifiedLLVMShift ctx := by
+  simp only [IsVerifiedLLVMShift] at ⊢
+  simp [verifyLLVMShift, verifyPlainOpCounts, verifyResultTypeMatches,
+    TypeAttr.verifyIntegerType, TypeAttr.verifyIntegerOrByteType, bind, Except.bind, throw,
+    throwThe, MonadExceptOf.throw, pure, Except.pure] at h
+  grind [getNumOperands!_eq_getNumOperands, getNumResults!_eq_getNumResults]
+
+private theorem OperationPtr.verifyLLVMShift_ok_of_Verified {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyLLVMShift ctx opInBounds >>= fun _ => pure ())) :
+    op.verifyLLVMShift ctx opInBounds = .ok () := by
+  rw [Verified, armReduces] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  cases hb : op.verifyLLVMShift ctx opInBounds with
+  | ok u => rfl
+  | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+
+private theorem OperationPtr.Verified.llvmShift {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyLLVMShift ctx opInBounds >>= fun _ => pure ())) :
+    op.IsVerifiedLLVMShift ctx :=
+  op.verifyLLVMShift_eq_ok <| op.verifyLLVMShift_ok_of_Verified opVerify armReduces
+
+theorem OperationPtr.Verified.llvm_shl {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .shl) :
+    op.IsVerifiedLLVMShift ctx := OperationPtr.Verified.llvmShift opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_lshr {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .lshr) :
+    op.IsVerifiedLLVMShift ctx := OperationPtr.Verified.llvmShift opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
 theorem OperationPtr.Verified.arith_addi {op : OperationPtr} {opInBounds}
     (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .addi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_andi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .andi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_ceildivsi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .ceildivsi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_ceildivui {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .ceildivui) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_divsi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .divsi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_divui {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .divui) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_floordivsi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .floordivsi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_maxsi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .maxsi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_maxui {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .maxui) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_minsi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .minsi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_minui {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .minui) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_muli {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .muli) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_ori {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .ori) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_remsi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .remsi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_remui {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .remui) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_shli {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .shli) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_shrsi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .shrsi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_shrui {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .shrui) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_subi {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .subi) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.arith_xori {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .arith .xori) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_and {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .and) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_or {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .or) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_xor {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .xor) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+/--
+  Structural facts guaranteed by the verifier for `llvm.mlir.constant`: no operands, one
+  result, no successors or regions.
+-/
+theorem OperationPtr.Verified.llvm_mlir__constant {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .mlir__constant) :
     op.getNumResults! ctx.raw = 1 ∧
-    op.getNumOperands! ctx.raw = 2 ∧
+    op.getNumOperands! ctx.raw = 0 ∧
     op.getNumSuccessors! ctx.raw = 0 ∧
-    op.getNumRegions! ctx.raw = 0 ∧
-    ∃ integerType,
-      ((op.getResult 0).get! ctx.raw).type = ⟨.integerType integerType, (by grind)⟩ ∧
-      ((op.getOperand! ctx.raw 0).getType! ctx.raw) = ⟨.integerType integerType, (by grind)⟩ ∧
-      ((op.getOperand! ctx.raw 1).getType! ctx.raw) = ⟨.integerType integerType, (by grind)⟩ := by
-  simp only [Verified, verifyLocalInvariants, ← getOpType!_eq_getOpType, opType, ne_eq,
-    verifyIntegerBinopTypes, verifyOperandTypesMatch, verifyResultTypeMatches,
-    TypeAttr.verifyIntegerType, bind, Except.bind, throw, throwThe, MonadExceptOf.throw, pure,
-    Except.pure, ite_not] at opVerify
-  simp only [TypeAttr.inj]
+    op.getNumRegions! ctx.raw = 0 := by
+  simp only [Verified, verifyLocalInvariants, HasOpInfo.verifyLocalInvariants,
+    OpCode.verifyLocalInvariants, Llvm.verifyLocalInvariants, ← getOpType!_eq_getOpType, opType,
+    verifyPlainOpCounts, ne_eq, bind, Except.bind, throw, throwThe, MonadExceptOf.throw, pure,
+    Except.pure] at opVerify
+  grind
+
+theorem OperationPtr.Verified.llvm_intr__smax {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__smax) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__smin {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__smin) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__umax {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__umax) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__umin {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__umin) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__usub__sat {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .intr__usub__sat) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__uadd__sat {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .intr__uadd__sat) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__sadd__sat {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .intr__sadd__sat) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__ssub__sat {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .intr__ssub__sat) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__sshl__sat {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .intr__sshl__sat) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_intr__ushl__sat {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .intr__ushl__sat) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+/--
+  Reduce a verified integer unary operation to a successful `verifyIntegerUnop` check.
+  The hypothesis `armReduces` says the operation's local-invariant check is exactly the
+  `verifyIntegerUnop` arm; it is discharged per operation by unfolding the dispatcher at the
+  concrete opcode.
+-/
+private theorem OperationPtr.verifyIntegerUnop_ok_of_Verified {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyIntegerUnop ctx opInBounds >>= fun _ => pure ())) :
+    ∃ ty, op.verifyIntegerUnop ctx opInBounds = .ok ty := by
+  rw [Verified, armReduces] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  cases hb : op.verifyIntegerUnop ctx opInBounds with
+  | ok ty => exact ⟨ty, rfl⟩
+  | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+
+/-- Structural facts from the verifier for a verified `llvm.intr.bitreverse`. Its verifier arm is
+    the shared `verifyIntegerUnop >>= pure` shape, so it reduces like `ctlz`/`cttz`/`ctpop`. -/
+theorem OperationPtr.Verified.llvm_intr__bitreverse {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .llvm .intr__bitreverse) :
+    op.IsVerifiedIntegerUnop ctx := by
+  obtain ⟨ty, hty⟩ := op.verifyIntegerUnop_ok_of_Verified opVerify <| by
+    simp [← getOpType!_eq_getOpType, opType]
+  exact op.verifyIntegerUnop_eq_ok hty
+
+/-- Structural facts from the verifier for a verified `llvm.intr.ctlz`. -/
+theorem OperationPtr.Verified.llvm_intr__ctlz {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__ctlz) :
+    op.IsVerifiedIntegerUnop ctx := by
+  obtain ⟨ty, hty⟩ := op.verifyIntegerUnop_ok_of_Verified opVerify <| by
+    simp [← getOpType!_eq_getOpType, opType]
+  exact op.verifyIntegerUnop_eq_ok hty
+
+/-- Structural facts from the verifier for a verified `llvm.intr.cttz`. -/
+theorem OperationPtr.Verified.llvm_intr__cttz {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__cttz) :
+    op.IsVerifiedIntegerUnop ctx := by
+  obtain ⟨ty, hty⟩ := op.verifyIntegerUnop_ok_of_Verified opVerify <| by
+    simp [← getOpType!_eq_getOpType, opType]
+  exact op.verifyIntegerUnop_eq_ok hty
+
+/-- Structural facts from the verifier for a verified `llvm.intr.ctpop`. -/
+theorem OperationPtr.Verified.llvm_intr__ctpop {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__ctpop) :
+    op.IsVerifiedIntegerUnop ctx := by
+  obtain ⟨ty, hty⟩ := op.verifyIntegerUnop_ok_of_Verified opVerify <| by
+    simp [← getOpType!_eq_getOpType, opType]
+  exact op.verifyIntegerUnop_eq_ok hty
+
+
+/-- Structural facts from the verifier for a verified `llvm.intr.abs`. Its verifier arm is exactly
+    the shared `verifyIntegerUnop >>= pure` shape (the `is_int_min_poison` property is not checked
+    structurally), so it reduces like the `ctlz`/`cttz`/`ctpop` lemmas. -/
+theorem OperationPtr.Verified.llvm_intr__abs {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__abs) :
+    op.IsVerifiedIntegerUnop ctx := by
+  obtain ⟨ty, hty⟩ := op.verifyIntegerUnop_ok_of_Verified opVerify <| by
+    simp [← getOpType!_eq_getOpType, opType]
+  exact op.verifyIntegerUnop_eq_ok hty
+
+
+/-- Structural facts from the verifier for a verified `llvm.intr.bswap`. Unlike the other unary
+    intrinsics, `bswap`'s verifier arm performs an extra bitwidth check *after* the shared
+    `verifyIntegerUnop`, so it is not exactly the `verifyIntegerUnop >>= pure` shape; we extract
+    the successful `verifyIntegerUnop` by hand from the leading bind. -/
+theorem OperationPtr.Verified.llvm_intr__bswap {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__bswap) :
+    op.IsVerifiedIntegerUnop ctx := by
+  rw [Verified] at opVerify
+  simp only [verifyLocalInvariants, HasOpInfo.verifyLocalInvariants, OpCode.verifyLocalInvariants,
+    Llvm.verifyLocalInvariants, ← getOpType!_eq_getOpType, opType] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  simp only [bind, Except.bind] at opVerify
+  obtain ⟨ty, hty⟩ : ∃ ty, op.verifyIntegerUnop ctx opInBounds = .ok ty := by
+    cases hb : op.verifyIntegerUnop ctx opInBounds with
+    | ok ty => exact ⟨ty, rfl⟩
+    | error e => rw [hb] at opVerify; simp at opVerify
+  exact op.verifyIntegerUnop_eq_ok hty
+
+/--
+  Reduce a verified integer ternary operation to a successful `verifyIntegerTernop` check.
+  `armReduces` says the operation's local-invariant check is exactly the `verifyIntegerTernop`
+  arm; it is discharged per operation by unfolding the dispatcher at the concrete opcode.
+-/
+private theorem OperationPtr.verifyIntegerTernop_ok_of_Verified {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyIntegerTernop ctx opInBounds >>= fun _ => pure ())) :
+    op.verifyIntegerTernop ctx opInBounds = .ok () := by
+  rw [Verified, armReduces] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  cases hb : op.verifyIntegerTernop ctx opInBounds with
+  | ok u => rfl
+  | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+
+/--
+  Every integer ternary operation's `Verified.*` lemma reduces to this: given a verified operation
+  whose local-invariant check is the `verifyIntegerTernop` arm, it satisfies
+  `IsVerifiedIntegerTernop`.
+-/
+private theorem OperationPtr.Verified.integerTernop {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyIntegerTernop ctx opInBounds >>= fun _ => pure ())) :
+    op.IsVerifiedIntegerTernop ctx :=
+  op.verifyIntegerTernop_eq_ok <| op.verifyIntegerTernop_ok_of_Verified opVerify armReduces
+
+/-- Structural facts from the verifier for a verified `llvm.intr.fshl`. -/
+theorem OperationPtr.Verified.llvm_intr__fshl {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__fshl) :
+    op.IsVerifiedIntegerTernop ctx := OperationPtr.Verified.integerTernop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+/-- Structural facts from the verifier for a verified `llvm.intr.fshr`. -/
+theorem OperationPtr.Verified.llvm_intr__fshr {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .intr__fshr) :
+    op.IsVerifiedIntegerTernop ctx := OperationPtr.Verified.integerTernop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+/--
+  Reduce a verified integer extension operation to a successful `verifyIntegerExtTypes` check.
+  `armReduces` says the operation's local-invariant check is exactly the `verifyIntegerExtTypes`
+  arm; it is discharged per operation by unfolding the dispatcher at the concrete opcode.
+-/
+private theorem OperationPtr.verifyIntegerExtTypes_ok_of_Verified {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyIntegerExtTypes ctx opInBounds >>= fun _ => pure ())) :
+    op.verifyIntegerExtTypes ctx opInBounds = .ok () := by
+  rw [Verified, armReduces] at opVerify
+  replace opVerify := Except.ok_of_bind_ok opVerify
+  cases hb : op.verifyIntegerExtTypes ctx opInBounds with
+  | ok u => rfl
+  | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+
+/--
+  Every integer extension operation's `Verified.*` lemma reduces to this: given a verified
+  operation whose local-invariant check is the `verifyIntegerExtTypes` arm, it satisfies
+  `IsVerifiedIntegerExtop`.
+-/
+private theorem OperationPtr.Verified.integerExtop {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.checkIsNonNullIntegerType ctx opInBounds >>= fun _ =>
+          op.verifyIntegerExtTypes ctx opInBounds >>= fun _ => pure ())) :
+    op.IsVerifiedIntegerExtop ctx :=
+  op.verifyIntegerExtTypes_eq_ok <| op.verifyIntegerExtTypes_ok_of_Verified opVerify armReduces
+
+/-- Structural facts from the verifier for a verified `llvm.sext`. -/
+theorem OperationPtr.Verified.llvm_sext {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .sext) :
+    op.IsVerifiedIntegerExtop ctx := OperationPtr.Verified.integerExtop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+/-- Structural facts from the verifier for a verified `llvm.zext`. -/
+theorem OperationPtr.Verified.llvm_zext {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .zext) :
+    op.IsVerifiedIntegerExtop ctx := OperationPtr.Verified.integerExtop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_add {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .add) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_sub {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .sub) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_ashr {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .ashr) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_mul {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .mul) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_sdiv {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .sdiv) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_udiv {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .udiv) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_srem {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .srem) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.llvm_urem {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .llvm .urem) :
+    op.IsVerifiedIntegerBinop ctx := OperationPtr.Verified.integerBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+/- Verified ModArith Op Lemmas -/
+
+def OperationPtr.IsVerifiedModArithBinop (op : OperationPtr) (ctx : WfIRContext OpCode) : Prop :=
+  op.getNumResults! ctx.raw = 1 ∧
+  op.getNumOperands! ctx.raw = 2 ∧
+  op.getNumSuccessors! ctx.raw = 0 ∧
+  op.getNumRegions! ctx.raw = 0 ∧
+  ∃ modArithType,
+    modArithType.modulus.value > 0 ∧
+    modArithType.modulus.value < 2 ^ modArithType.modulus.type.bitwidth ∧
+    ((op.getResult 0).get! ctx.raw).type = Attribute.asType (.modArithType modArithType) (by grind) ∧
+    ((op.getOperand! ctx.raw 0).getType! ctx.raw) = Attribute.asType (.modArithType modArithType) (by grind) ∧
+    ((op.getOperand! ctx.raw 1).getType! ctx.raw) = Attribute.asType (.modArithType modArithType) (by grind)
+
+
+private theorem OperationPtr.verifyModArithBinOp_eq_ok {ctx : WfIRContext OpCode} {op : OperationPtr}
+    {opInBounds : op.InBounds ctx.raw} (h : op.verifyModArithBinOp ctx opInBounds = .ok ()) :
+    op.IsVerifiedModArithBinop ctx := by
+  simp only [IsVerifiedModArithBinop, TypeAttr.inj]
+  simp only [verifyModArithBinOp, verifyPlainOpCounts, verifyOperandTypesMatch,
+             verifyResultTypeMatches, TypeAttr.verifyModArithType,
+             Except_bind_ok_iff, exists_punit] at h
+  obtain ⟨hPlainOpCounts, operandType, hOperandTypesMatch,
+          hResultTypeMatches, modArithType, hModArithType, _⟩ := h
+  simp only [bind, Except.bind, throw, throwThe, MonadExceptOf.throw, pure, Except.pure]
+    at hPlainOpCounts hOperandTypesMatch hResultTypeMatches hModArithType
+  grind
+
+private theorem OperationPtr.Verified.modArithBinop {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (armReduces : op.verifyLocalInvariants ctx opInBounds
+      = (op.verifyModArithBinOp ctx opInBounds >>= fun _ => pure ())) :
+    op.IsVerifiedModArithBinop ctx := by
+  rw [Verified, armReduces] at opVerify
+  have h : op.verifyModArithBinOp ctx opInBounds = .ok () := by
+    cases hb : op.verifyModArithBinOp ctx opInBounds with
+    | ok _ => rfl
+    | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+  exact op.verifyModArithBinOp_eq_ok h
+
+theorem OperationPtr.Verified.mod_arith_add {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .mod_arith .add) :
+    op.IsVerifiedModArithBinop ctx := OperationPtr.Verified.modArithBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.mod_arith_mul {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .mod_arith .mul) :
+    op.IsVerifiedModArithBinop ctx := OperationPtr.Verified.modArithBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+theorem OperationPtr.Verified.mod_arith_sub {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .mod_arith .sub) :
+    op.IsVerifiedModArithBinop ctx := OperationPtr.Verified.modArithBinop opVerify <| by
+  simp [← getOpType!_eq_getOpType, opType]
+
+def OperationPtr.IsVerifiedModArithConstant (op : OperationPtr) (ctx : WfIRContext OpCode) : Prop :=
+  op.getNumOperands! ctx.raw = 0 ∧
+  op.getNumResults! ctx.raw = 1 ∧
+  op.getNumSuccessors! ctx.raw = 0 ∧
+  op.getNumRegions! ctx.raw = 0 ∧
+  ∃ modArithType,
+    ((op.getResult 0).get! ctx.raw).type = Attribute.asType (.modArithType modArithType) (by grind) ∧
+    modArithType.modulus.value > 0 ∧
+    modArithType.modulus.value < 2 ^ modArithType.modulus.type.bitwidth ∧
+    -(2 ^ (modArithType.modulus.type.bitwidth - 1) : Int)
+        ≤ (op.getProperties! ctx.raw Mod_Arith.constant).value.value ∧
+    (op.getProperties! ctx.raw Mod_Arith.constant).value.value
+        < 2 ^ modArithType.modulus.type.bitwidth
+
+theorem OperationPtr.Verified.mod_arith_constant {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds)
+    (opType : op.getOpType! ctx.raw = .mod_arith .constant) :
+    op.IsVerifiedModArithConstant ctx := by
+  simp only [Verified, verifyLocalInvariants, HasOpInfo.verifyLocalInvariants,
+    OpCode.verifyLocalInvariants, Mod_Arith.verifyLocalInvariants,
+    ← getOpType!_eq_getOpType, opType] at opVerify
+  have h : op.verifyModArithConstantOp ctx opInBounds = .ok () := by
+    cases hb : op.verifyModArithConstantOp ctx opInBounds with
+    | ok _ => rfl
+    | error e => rw [hb] at opVerify; simp [bind, Except.bind] at opVerify
+  simp only [IsVerifiedModArithConstant, TypeAttr.inj]
+  simp only [verifyModArithConstantOp, verifyPlainOpCounts, TypeAttr.verifyModArithType,
+            Except_bind_ok_iff, exists_punit] at h
+  obtain ⟨hPlainOpCounts, modArithType, hModArithType, hAttr⟩ := h
+  simp only [bind, Except.bind, throw, throwThe, MonadExceptOf.throw, pure, Except.pure]
+    at hPlainOpCounts hModArithType hAttr
+  grind
+
+/-- Structural facts guaranteed for a verified `func.func`: it has no operands, results, or
+successors, and exactly one region (its body). -/
+theorem OperationPtr.Verified.func_func {op : OperationPtr} {opInBounds}
+    (opVerify : op.Verified ctx opInBounds) (opType : op.getOpType! ctx.raw = .func .func) :
+    op.getNumOperands! ctx.raw = 0 ∧
+    op.getNumResults! ctx.raw = 0 ∧
+    op.getNumSuccessors! ctx.raw = 0 ∧
+    op.getNumRegions! ctx.raw = 1 := by
+  simp only [Verified, verifyLocalInvariants, HasOpInfo.verifyLocalInvariants,
+    OpCode.verifyLocalInvariants, Func.verifyLocalInvariants,
+    ← getOpType!_eq_getOpType, opType, ne_eq, bind, Except.bind, throw,
+    throwThe, MonadExceptOf.throw, pure, Except.pure, ite_not] at opVerify
   grind
 
 end

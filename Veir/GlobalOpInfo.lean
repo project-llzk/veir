@@ -1,21 +1,9 @@
 module
 
-public import Veir.Dialects.Arith.OpInfo
-public import Veir.Dialects.LLVM.OpInfo
-public import Veir.Dialects.RISCV.OpInfo
-public import Veir.Dialects.RISCV_Cf.OpInfo
-public import Veir.Dialects.RISCV_Stack.OpInfo
-public import Veir.Dialects.ModArith.OpInfo
-public import Veir.Dialects.Cf.OpInfo
-public import Veir.Dialects.Comb.OpInfo
-public import Veir.Dialects.LLZK.Felt.OpInfo
-public import Veir.Dialects.LLZK.String.OpInfo
-public import Veir.Dialects.LLZK.Include.OpInfo
-public import Veir.Dialects.LLZK.Bool.OpInfo
-public import Veir.Dialects.LLZK.Global.OpInfo
-public import Veir.Dialects.LLZK.Function.OpInfo
-public import Veir.Dialects.HW.OpInfo
+import Veir.Meta.OpCode
+
 public import Veir.IR.Basic
+public import Veir.OpCode
 
 namespace Veir
 
@@ -33,434 +21,458 @@ match opCode with
 | .riscv op => Riscv.propertiesOf op
 | .riscv_cf op => Riscv_Cf.propertiesOf op
 | .riscv_stack op => Riscv_Stack.propertiesOf op
+| .rv64 op => Rv64.propertiesOf op
 | .mod_arith op => Mod_Arith.propertiesOf op
 | .cf op => Cf.propertiesOf op
 | .comb op => Comb.propertiesOf op
+| .hw op => HW.propertiesOf op
+| .builtin op => Builtin.propertiesOf op
+| .func op => Func.propertiesOf op
+| .datapath op => Datapath.propertiesOf op
+| .pdl op => PDL.propertiesOf op
+| .test op => Test.propertiesOf op
 | .felt op => Felt.propertiesOf op
 | .string op => String_.propertiesOf op
 | .include op => Include_.propertiesOf op
+| .ram op => Ram.propertiesOf op
+| .cast op => Cast.propertiesOf op
 | .bool op => Bool_.propertiesOf op
+| .constrain op => Constrain.propertiesOf op
 | .global op => Global.propertiesOf op
 | .function op => Function_.propertiesOf op
-| .hw op => HW.propertiesOf op
-| .builtin .unregistered => UnregisteredProperties
-| .func .func => FuncFuncProperties
-| .func .call => FuncCallProperties
-| _ => Unit
 
-instance : HasDialectOpInfo OpCode where
-  propertiesOf := _propertiesOf
+/--
+  What are the memory effects of an operation with this opcode and these
+  properties?
+-/
+def OpCode.getEffects (opCode : OpCode) (props : _propertiesOf opCode) : MemoryEffects :=
+  match opCode, props with
+  | .arith op, props => Arith.getEffects op props
+  | .llvm op, props => Llvm.getEffects op props
+  | .riscv op, props => Riscv.getEffects op props
+  | .riscv_cf op, props => Riscv_Cf.getEffects op props
+  | .riscv_stack op, props => Riscv_Stack.getEffects op props
+  | .rv64 op, props => Rv64.getEffects op props
+  | .mod_arith op, props => Mod_Arith.getEffects op props
+  | .cf op, props => Cf.getEffects op props
+  | .comb op, props => Comb.getEffects op props
+  | .hw op, props => HW.getEffects op props
+  | .builtin op, props => Builtin.getEffects op props
+  | .func op, props => Func.getEffects op props
+  | .datapath op, props => Datapath.getEffects op props
+  | .pdl op, props => PDL.getEffects op props
+  | .test op, props => Test.getEffects op props
+  | .felt op, props => Felt.getEffects op props
+  | .string op, props => String_.getEffects op props
+  | .include op, props => Include_.getEffects op props
+  | .ram op, props => Ram.getEffects op props
+  | .cast op, props => Cast.getEffects op props
+  | .bool op, props => Bool_.getEffects op props
+  | .constrain op, props => Constrain.getEffects op props
+  | .global op, props => Global.getEffects op props
+  | .function op, props => Function_.getEffects op props
 
-instance : HasOpInfo OpCode where
-  moduleOpCode := .builtin .module
+/--
+  Return the kind of the region with the given index inside this operation.
+-/
+def OpCode.getRegionKind (opCode : OpCode) (index : Nat) : RegionKind :=
+  match opCode with
+  | .arith op => HasOpInfo.getRegionKind op index
+  | .llvm op => HasOpInfo.getRegionKind op index
+  | .riscv op => HasOpInfo.getRegionKind op index
+  | .riscv_cf op => HasOpInfo.getRegionKind op index
+  | .riscv_stack op => HasOpInfo.getRegionKind op index
+  | .rv64 op => HasOpInfo.getRegionKind op index
+  | .mod_arith op => HasOpInfo.getRegionKind op index
+  | .cf op => HasOpInfo.getRegionKind op index
+  | .comb op => HasOpInfo.getRegionKind op index
+  | .hw op => HasOpInfo.getRegionKind op index
+  | .builtin op => HasOpInfo.getRegionKind op index
+  | .func op => HasOpInfo.getRegionKind op index
+  | .datapath op => HasOpInfo.getRegionKind op index
+  | .pdl op => HasOpInfo.getRegionKind op index
+  | .test op => HasOpInfo.getRegionKind op index
+  | .felt op => HasOpInfo.getRegionKind op index
+  | .string op => HasOpInfo.getRegionKind op index
+  | .include op => HasOpInfo.getRegionKind op index
+  | .ram op => HasOpInfo.getRegionKind op index
+  | .cast op => HasOpInfo.getRegionKind op index
+  | .bool op => HasOpInfo.getRegionKind op index
+  | .constrain op => HasOpInfo.getRegionKind op index
+  | .global op => HasOpInfo.getRegionKind op index
+  | .function op => HasOpInfo.getRegionKind op index
 
-abbrev propertiesOf := HasOpInfo.propertiesOf (self := instHasOpInfoOpCode)
+/--
+  Whether definitions in the indexed region of this opcode must dominate
+  their uses.
+-/
+def OpCode.hasSSADominance (opCode : OpCode) (index : Nat) : Bool :=
+  match opCode with
+  | .arith op => Arith.hasSSADominance op index
+  | .llvm op => Llvm.hasSSADominance op index
+  | .riscv op => Riscv.hasSSADominance op index
+  | .riscv_cf op => Riscv_Cf.hasSSADominance op index
+  | .riscv_stack op => Riscv_Stack.hasSSADominance op index
+  | .rv64 op => Rv64.hasSSADominance op index
+  | .mod_arith op => Mod_Arith.hasSSADominance op index
+  | .cf op => Cf.hasSSADominance op index
+  | .comb op => Comb.hasSSADominance op index
+  | .hw op => HW.hasSSADominance op index
+  | .builtin op => Builtin.hasSSADominance op index
+  | .func op => Func.hasSSADominance op index
+  | .datapath op => Datapath.hasSSADominance op index
+  | .pdl op => PDL.hasSSADominance op index
+  | .test op => Test.hasSSADominance op index
+  | .felt op => Felt.hasSSADominance op index
+  | .string op => String_.hasSSADominance op index
+  | .include op => Include_.hasSSADominance op index
+  | .ram op => Ram.hasSSADominance op index
+  | .cast op => Cast.hasSSADominance op index
+  | .bool op => Bool_.hasSSADominance op index
+  | .constrain op => Constrain.hasSSADominance op index
+  | .global op => Global.hasSSADominance op index
+  | .function op => Function_.hasSSADominance op index
+
+/--
+  Whether the indexed region of this opcode is exempt from the requirement
+  that each of its blocks ends in a terminator. Dialects that do not say
+  otherwise inherit the `HasOpInfo` default of `false`.
+-/
+def OpCode.hasNoTerminator (opCode : OpCode) (index : Nat) : Bool :=
+  match opCode with
+  | .arith op => HasOpInfo.hasNoTerminator op index
+  | .llvm op => HasOpInfo.hasNoTerminator op index
+  | .riscv op => HasOpInfo.hasNoTerminator op index
+  | .riscv_cf op => HasOpInfo.hasNoTerminator op index
+  | .riscv_stack op => HasOpInfo.hasNoTerminator op index
+  | .rv64 op => HasOpInfo.hasNoTerminator op index
+  | .mod_arith op => HasOpInfo.hasNoTerminator op index
+  | .cf op => HasOpInfo.hasNoTerminator op index
+  | .comb op => HasOpInfo.hasNoTerminator op index
+  | .hw op => HasOpInfo.hasNoTerminator op index
+  | .builtin op => HasOpInfo.hasNoTerminator op index
+  | .func op => HasOpInfo.hasNoTerminator op index
+  | .datapath op => HasOpInfo.hasNoTerminator op index
+  | .pdl op => HasOpInfo.hasNoTerminator op index
+  | .test op => HasOpInfo.hasNoTerminator op index
+  | .felt op => HasOpInfo.hasNoTerminator op index
+  | .string op => HasOpInfo.hasNoTerminator op index
+  | .include op => HasOpInfo.hasNoTerminator op index
+  | .ram op => HasOpInfo.hasNoTerminator op index
+  | .cast op => HasOpInfo.hasNoTerminator op index
+  | .bool op => HasOpInfo.hasNoTerminator op index
+  | .constrain op => HasOpInfo.hasNoTerminator op index
+  | .global op => HasOpInfo.hasNoTerminator op index
+  | .function op => HasOpInfo.hasNoTerminator op index
+
+/-- Whether this opcode carries MLIR's `IsolatedFromAbove` trait. -/
+def OpCode.isIsolatedFromAbove (opCode : OpCode) : Bool :=
+  match opCode with
+  | .arith op => HasOpInfo.isIsolatedFromAbove op
+  | .llvm op => HasOpInfo.isIsolatedFromAbove op
+  | .riscv op => HasOpInfo.isIsolatedFromAbove op
+  | .riscv_cf op => HasOpInfo.isIsolatedFromAbove op
+  | .riscv_stack op => HasOpInfo.isIsolatedFromAbove op
+  | .rv64 op => HasOpInfo.isIsolatedFromAbove op
+  | .mod_arith op => HasOpInfo.isIsolatedFromAbove op
+  | .cf op => HasOpInfo.isIsolatedFromAbove op
+  | .comb op => HasOpInfo.isIsolatedFromAbove op
+  | .hw op => HasOpInfo.isIsolatedFromAbove op
+  | .builtin op => HasOpInfo.isIsolatedFromAbove op
+  | .func op => HasOpInfo.isIsolatedFromAbove op
+  | .datapath op => HasOpInfo.isIsolatedFromAbove op
+  | .pdl op => HasOpInfo.isIsolatedFromAbove op
+  | .test op => HasOpInfo.isIsolatedFromAbove op
+  | .felt op => HasOpInfo.isIsolatedFromAbove op
+  | .string op => HasOpInfo.isIsolatedFromAbove op
+  | .include op => HasOpInfo.isIsolatedFromAbove op
+  | .ram op => HasOpInfo.isIsolatedFromAbove op
+  | .cast op => HasOpInfo.isIsolatedFromAbove op
+  | .bool op => HasOpInfo.isIsolatedFromAbove op
+  | .constrain op => HasOpInfo.isIsolatedFromAbove op
+  | .global op => HasOpInfo.isIsolatedFromAbove op
+  | .function op => HasOpInfo.isIsolatedFromAbove op
+
+/--
+  Does this OpCode count as an MLIR basic block terminator? Dialects that do
+  not say otherwise inherit the `HasOpInfo` default of `false`.
+-/
+def OpCode.isTerminator (opCode : OpCode) : Bool :=
+  match opCode with
+  | .arith op => HasOpInfo.isTerminator op
+  | .llvm op => HasOpInfo.isTerminator op
+  | .riscv op => HasOpInfo.isTerminator op
+  | .riscv_cf op => HasOpInfo.isTerminator op
+  | .riscv_stack op => HasOpInfo.isTerminator op
+  | .rv64 op => HasOpInfo.isTerminator op
+  | .mod_arith op => HasOpInfo.isTerminator op
+  | .cf op => HasOpInfo.isTerminator op
+  | .comb op => HasOpInfo.isTerminator op
+  | .hw op => HasOpInfo.isTerminator op
+  | .builtin op => HasOpInfo.isTerminator op
+  | .func op => HasOpInfo.isTerminator op
+  | .datapath op => HasOpInfo.isTerminator op
+  | .pdl op => HasOpInfo.isTerminator op
+  | .test op => HasOpInfo.isTerminator op
+  | .felt op => HasOpInfo.isTerminator op
+  | .string op => HasOpInfo.isTerminator op
+  | .include op => HasOpInfo.isTerminator op
+  | .ram op => HasOpInfo.isTerminator op
+  | .cast op => HasOpInfo.isTerminator op
+  | .bool op => HasOpInfo.isTerminator op
+  | .constrain op => HasOpInfo.isTerminator op
+  | .global op => HasOpInfo.isTerminator op
+  | .function op => HasOpInfo.isTerminator op
+
+/--
+  Does this `OpCode` materialize a literal constant value, i.e. an op
+  whose single result is a compile-time constant taken from its
+  properties, with no SSA operands and no side effects?
+
+  This is the analogue of MLIR's `ConstantLike` op trait, which likewise
+  covers `llvm.mlir.poison`: poison is a perfectly good constant.
+-/
+def OpCode.isConstantLike (opCode : OpCode) : Bool :=
+  match opCode with
+  | .arith op => Arith.isConstantLike op
+  | .llvm op => Llvm.isConstantLike op
+  | .riscv op => Riscv.isConstantLike op
+  | .riscv_cf op => Riscv_Cf.isConstantLike op
+  | .riscv_stack op => Riscv_Stack.isConstantLike op
+  | .rv64 op => Rv64.isConstantLike op
+  | .mod_arith op => Mod_Arith.isConstantLike op
+  | .cf op => Cf.isConstantLike op
+  | .comb op => Comb.isConstantLike op
+  | .hw op => HW.isConstantLike op
+  | .builtin op => Builtin.isConstantLike op
+  | .func op => Func.isConstantLike op
+  | .datapath op => Datapath.isConstantLike op
+  | .pdl op => PDL.isConstantLike op
+  | .test op => Test.isConstantLike op
+  | .felt op => Felt.isConstantLike op
+  | .string op => String_.isConstantLike op
+  | .include op => Include_.isConstantLike op
+  | .ram op => Ram.isConstantLike op
+  | .cast op => Cast.isConstantLike op
+  | .bool op => Bool_.isConstantLike op
+  | .constrain op => Constrain.isConstantLike op
+  | .global op => Global.isConstantLike op
+  | .function op => Function_.isConstantLike op
+
+/--
+  Does an operation with this opcode produce a wholly poisoned result whenever
+  any one of its operands is wholly poison?
+-/
+def OpCode.propagatesPoison (opCode : OpCode) : Bool :=
+  match opCode with
+  | .arith op => HasOpInfo.propagatesPoison op
+  | .llvm op => HasOpInfo.propagatesPoison op
+  | .riscv op => HasOpInfo.propagatesPoison op
+  | .riscv_cf op => HasOpInfo.propagatesPoison op
+  | .riscv_stack op => HasOpInfo.propagatesPoison op
+  | .rv64 op => HasOpInfo.propagatesPoison op
+  | .mod_arith op => HasOpInfo.propagatesPoison op
+  | .cf op => HasOpInfo.propagatesPoison op
+  | .comb op => HasOpInfo.propagatesPoison op
+  | .hw op => HasOpInfo.propagatesPoison op
+  | .builtin op => HasOpInfo.propagatesPoison op
+  | .func op => HasOpInfo.propagatesPoison op
+  | .datapath op => HasOpInfo.propagatesPoison op
+  | .pdl op => HasOpInfo.propagatesPoison op
+  | .test op => HasOpInfo.propagatesPoison op
+  | .felt op => HasOpInfo.propagatesPoison op
+  | .string op => HasOpInfo.propagatesPoison op
+  | .include op => HasOpInfo.propagatesPoison op
+  | .ram op => HasOpInfo.propagatesPoison op
+  | .cast op => HasOpInfo.propagatesPoison op
+  | .bool op => HasOpInfo.propagatesPoison op
+  | .constrain op => HasOpInfo.propagatesPoison op
+  | .global op => HasOpInfo.propagatesPoison op
+  | .function op => HasOpInfo.propagatesPoison op
 
 def Properties.fromAttrDict (opCode : OpCode) (attrDict : Std.HashMap ByteArray Attribute) :
-    Except String (propertiesOf opCode) := by
-  cases opCode
-  case test =>
-    all_goals exact (Except.ok ())
-  case datapath =>
-    all_goals exact (Except.ok ())
-  case string op =>
-    cases op
-    case new => exact (StringNewProperties.fromAttrDict attrDict)
-  case «include» op =>
-    cases op
-    case «from» => exact (IncludeFromProperties.fromAttrDict attrDict)
-  case ram =>
-    all_goals exact (Except.ok ())
-  case cast =>
-    all_goals exact (Except.ok ())
-  case bool op =>
-    cases op
-    case assert => exact (BoolAssertProperties.fromAttrDict attrDict)
-    case cmp => exact (BoolCmpProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case constrain =>
-    all_goals exact (Except.ok ())
-  case global op =>
-    cases op
-    case «def» => exact (GlobalDefProperties.fromAttrDict attrDict)
-    case read => exact (GlobalRefProperties.fromAttrDict "global.read" attrDict)
-    case write => exact (GlobalRefProperties.fromAttrDict "global.write" attrDict)
-  case function op =>
-    cases op
-    case «def» => exact (FunctionDefProperties.fromAttrDict attrDict)
-    case «return» => exact (Except.ok ())
-  case felt op =>
-    cases op
-    case const => exact (FeltConstProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case mod_arith op =>
-    cases op
-    case constant => exact (ModArithConstantProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case riscv op =>
-    cases op
-    case li => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case lui => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case auipc => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case andi => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case ori => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case xori => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case addi => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case slti => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case sltiu => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case addiw => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case slli => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case srli => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case srai => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case slliw => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case srliw => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case sraiw => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case slliuw => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case rori => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case roriw => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case bclri => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case bexti => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case binvi => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case bseti => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case ld => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case sd => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case sw => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case sh => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    case sb => exact (RISCVImmediateProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case riscv_cf op =>
-    cases op
-    case beq => exact (RISCVBrProperties.fromAttrDict attrDict)
-    case bne => exact (RISCVBrProperties.fromAttrDict attrDict)
-    case blt => exact (RISCVBrProperties.fromAttrDict attrDict)
-    case bge => exact (RISCVBrProperties.fromAttrDict attrDict)
-    case bltu => exact (RISCVBrProperties.fromAttrDict attrDict)
-    case bgeu => exact (RISCVBrProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case riscv_stack op =>
-    cases op
-    case alloca => exact (RISCVStackAllocaProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case llvm op =>
-    cases op
-    case mlir__constant => exact (LLVMConstantProperties.fromAttrDict attrDict)
-    case add => exact (NswNuwProperties.fromAttrDict attrDict)
-    case sub => exact (NswNuwProperties.fromAttrDict attrDict)
-    case mul => exact (NswNuwProperties.fromAttrDict attrDict)
-    case udiv => exact (ExactProperties.fromAttrDict attrDict)
-    case sdiv => exact (ExactProperties.fromAttrDict attrDict)
-    case shl => exact (NswNuwProperties.fromAttrDict attrDict)
-    case lshr => exact (ExactProperties.fromAttrDict attrDict)
-    case ashr => exact (ExactProperties.fromAttrDict attrDict)
-    case or => exact (DisjointProperties.fromAttrDict attrDict)
-    case trunc => exact (NswNuwProperties.fromAttrDict attrDict)
-    case zext => exact (NnegProperties.fromAttrDict attrDict)
-    case icmp => exact (IcmpProperties.fromAttrDict attrDict)
-    case cond_br => exact (CondBrProperties.fromAttrDict attrDict)
-    case alloca => exact (AllocaProperties.fromAttrDict attrDict)
-    case load => exact (LoadProperties.fromAttrDict attrDict)
-    case store => exact (StoreProperties.fromAttrDict attrDict)
-    case getelementptr => exact (GetelementptrProperties.fromAttrDict attrDict)
-    case fadd => exact (FastMathFlagsProperties.fromAttrDict attrDict)
-    case fsub => exact (FastMathFlagsProperties.fromAttrDict attrDict)
-    case fmul => exact (FastMathFlagsProperties.fromAttrDict attrDict)
-    case fdiv => exact (FastMathFlagsProperties.fromAttrDict attrDict)
-    case frem => exact (FastMathFlagsProperties.fromAttrDict attrDict)
-    case func => exact (LLVMFuncProperties.fromAttrDict attrDict)
-    case module_flags => exact (LLVMModuleFlagsProperties.fromAttrDict attrDict)
-    case call => exact (LLVMCallProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case func op =>
-    cases op
-    case func => exact (FuncFuncProperties.fromAttrDict attrDict)
-    case call => exact (FuncCallProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case cf op =>
-    cases op
-    case cond_br => exact (CondBrProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case builtin op =>
-    cases op
-    case unregistered => exact (UnregisteredProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case arith op =>
-    cases op
-    case constant => exact (ArithConstantProperties.fromAttrDict attrDict)
-    case addi => exact (NswNuwProperties.fromAttrDict attrDict)
-    case subi => exact (NswNuwProperties.fromAttrDict attrDict)
-    case muli => exact (NswNuwProperties.fromAttrDict attrDict)
-    case divsi => exact (ExactProperties.fromAttrDict attrDict)
-    case divui => exact (ExactProperties.fromAttrDict attrDict)
-    case cmpi => exact (IcmpProperties.fromAttrDictFor "arith.cmpi" attrDict)
-    case shli => exact (NswNuwProperties.fromAttrDict attrDict)
-    case shrsi => exact (ExactProperties.fromAttrDict attrDict)
-    case shrui => exact (ExactProperties.fromAttrDict attrDict)
-    case ori => exact (DisjointProperties.fromAttrDict attrDict)
-    case trunci => exact (NswNuwProperties.fromAttrDict attrDict)
-    case extui => exact (NnegProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case comb op =>
-    cases op
-    case extract => exact (CombExtractProperties.fromAttrDict attrDict)
-    case icmp => exact (CombIcmpProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
-  case hw op =>
-    cases op
-    case constant => exact (HWConstantProperties.fromAttrDict attrDict)
-    case module => exact (HWModuleProperties.fromAttrDict attrDict)
-    all_goals exact (Except.ok ())
+    Except String (_propertiesOf opCode) :=
+  match opCode with
+  | .arith op => Arith.fromAttrDict op attrDict
+  | .llvm op => Llvm.fromAttrDict op attrDict
+  | .riscv op => Riscv.fromAttrDict op attrDict
+  | .riscv_cf op => Riscv_Cf.fromAttrDict op attrDict
+  | .riscv_stack op => Riscv_Stack.fromAttrDict op attrDict
+  | .rv64 op => Rv64.fromAttrDict op attrDict
+  | .mod_arith op => Mod_Arith.fromAttrDict op attrDict
+  | .cf op => Cf.fromAttrDict op attrDict
+  | .comb op => Comb.fromAttrDict op attrDict
+  | .hw op => HW.fromAttrDict op attrDict
+  | .builtin op => Builtin.fromAttrDict op attrDict
+  | .func op => Func.fromAttrDict op attrDict
+  | .datapath op => Datapath.fromAttrDict op attrDict
+  | .pdl op => PDL.fromAttrDict op attrDict
+  | .test op => Test.fromAttrDict op attrDict
+  | .felt op => Felt.fromAttrDict op attrDict
+  | .string op => String_.fromAttrDict op attrDict
+  | .include op => Include_.fromAttrDict op attrDict
+  | .ram op => Ram.fromAttrDict op attrDict
+  | .cast op => Cast.fromAttrDict op attrDict
+  | .bool op => Bool_.fromAttrDict op attrDict
+  | .constrain op => Constrain.fromAttrDict op attrDict
+  | .global op => Global.fromAttrDict op attrDict
+  | .function op => Function_.fromAttrDict op attrDict
 
 /--
   Converts the properties of an operation into a dictionary of attributes.
 -/
-def Properties.toAttrDict (opCode : OpCode) (props : propertiesOf opCode) :
+def Properties.toAttrDict
+    (opCode : OpCode) (props : _propertiesOf opCode) :
     Std.HashMap ByteArray Attribute :=
+  match opCode, props with
+  | .arith op, props => Arith.toAttrDict op props
+  | .llvm op, props => Llvm.toAttrDict op props
+  | .riscv op, props => Riscv.toAttrDict op props
+  | .riscv_cf op, props => Riscv_Cf.toAttrDict op props
+  | .riscv_stack op, props => Riscv_Stack.toAttrDict op props
+  | .rv64 op, props => Rv64.toAttrDict op props
+  | .mod_arith op, props => Mod_Arith.toAttrDict op props
+  | .cf op, props => Cf.toAttrDict op props
+  | .comb op, props => Comb.toAttrDict op props
+  | .hw op, props => HW.toAttrDict op props
+  | .builtin op, props => Builtin.toAttrDict op props
+  | .func op, props => Func.toAttrDict op props
+  | .datapath op, props => Datapath.toAttrDict op props
+  | .pdl op, props => PDL.toAttrDict op props
+  | .test op, props => Test.toAttrDict op props
+  | .felt op, props => Felt.toAttrDict op props
+  | .string op, props => String_.toAttrDict op props
+  | .include op, props => Include_.toAttrDict op props
+  | .ram op, props => Ram.toAttrDict op props
+  | .cast op, props => Cast.toAttrDict op props
+  | .bool op, props => Bool_.toAttrDict op props
+  | .constrain op, props => Constrain.toAttrDict op props
+  | .global op, props => Global.toAttrDict op props
+  | .function op, props => Function_.toAttrDict op props
+
+instance : IsOpCode OpCode where
+  fromName := OpCode.fromName
+  name := OpCode.name
+  propertiesOf := _propertiesOf
+  fromAttrDict := Properties.fromAttrDict
+  toAttrDict := Properties.toAttrDict
+
+/-- Function-interface information assembled from the registered dialects. -/
+def OpCode.functionInterface? (opCode : OpCode) : Option (FunctionOpInterface (_propertiesOf opCode)) :=
   match opCode with
-  | .arith .constant =>
-    (Std.HashMap.emptyWithCapacity 2).insert "value".toUTF8 (Attribute.integerAttr props.value)
-  | .llvm .mlir__constant =>
-    match props.value with
-    | .integer intAttr =>
-      (Std.HashMap.emptyWithCapacity 1).insert "value".toUTF8 (Attribute.integerAttr intAttr)
-    | .float floatAttr =>
-      (Std.HashMap.emptyWithCapacity 1).insert "value".toUTF8 (Attribute.floatAttr floatAttr)
-  | .felt .const =>
-    (Std.HashMap.emptyWithCapacity 2).insert "value".toUTF8 (Attribute.feltConstAttr props.value)
-  | .string .new =>
-    (Std.HashMap.emptyWithCapacity 2).insert "value".toUTF8 (Attribute.stringAttr props.value)
-  | .include .from =>
-    let dict := (Std.HashMap.emptyWithCapacity 2).insert "sym_name".toUTF8 (Attribute.stringAttr props.sym_name)
-    dict.insert "path".toUTF8 (Attribute.stringAttr props.path)
-  | .bool .assert =>
-    match props.msg with
-    | some m => (Std.HashMap.emptyWithCapacity 1).insert "msg".toUTF8 (Attribute.stringAttr m)
-    | none => Std.HashMap.emptyWithCapacity 0
-  | .bool .cmp =>
-    (Std.HashMap.emptyWithCapacity 1).insert "predicate".toUTF8 (Attribute.integerAttr props.predicate)
-  | .global .«def» => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 4
-    dict := dict.insert "sym_name".toUTF8 (Attribute.stringAttr props.sym_name)
-    if props.constant then
-      dict := dict.insert "constant".toUTF8 (Attribute.unitAttr UnitAttr.mk)
-    dict := dict.insert "type".toUTF8 props.type
-    if let some iv := props.initial_value then
-      dict := dict.insert "initial_value".toUTF8 iv
-    dict
-  | .global .read | .global .write =>
-    (Std.HashMap.emptyWithCapacity 1).insert "name_ref".toUTF8 (Attribute.flatSymbolRefAttr props.name_ref)
-  | .function .«def» =>
-    let dict := (Std.HashMap.emptyWithCapacity 2).insert "sym_name".toUTF8 (Attribute.stringAttr props.sym_name)
-    dict.insert "function_type".toUTF8 (Attribute.functionType props.function_type)
-  | .arith .addi | .arith .subi | .arith .muli | .arith .shli | .arith .trunci
-  | .llvm .add | .llvm .sub | .llvm .mul | .llvm .shl | .llvm .trunc => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 1
+  | .arith op => HasOpInfo.functionInterface? op
+  | .llvm op => HasOpInfo.functionInterface? op
+  | .riscv op => HasOpInfo.functionInterface? op
+  | .riscv_cf op => HasOpInfo.functionInterface? op
+  | .riscv_stack op => HasOpInfo.functionInterface? op
+  | .rv64 op => HasOpInfo.functionInterface? op
+  | .mod_arith op => HasOpInfo.functionInterface? op
+  | .cf op => HasOpInfo.functionInterface? op
+  | .comb op => HasOpInfo.functionInterface? op
+  | .hw op => HasOpInfo.functionInterface? op
+  | .builtin op => HasOpInfo.functionInterface? op
+  | .func op => HasOpInfo.functionInterface? op
+  | .datapath op => HasOpInfo.functionInterface? op
+  | .pdl op => HasOpInfo.functionInterface? op
+  | .test op => HasOpInfo.functionInterface? op
+  | .felt op => HasOpInfo.functionInterface? op
+  | .string op => HasOpInfo.functionInterface? op
+  | .include op => HasOpInfo.functionInterface? op
+  | .ram op => HasOpInfo.functionInterface? op
+  | .cast op => HasOpInfo.functionInterface? op
+  | .bool op => HasOpInfo.functionInterface? op
+  | .constrain op => HasOpInfo.functionInterface? op
+  | .global op => HasOpInfo.functionInterface? op
+  | .function op => HasOpInfo.functionInterface? op
 
-    let mut val := 0
-    if props.nsw then
-      val := val + 1
+#generate_has_dialect_instances OpCode
 
-    if props.nuw then
-      val := val + 2
+@[expose]
+def OpCode.verifyLocalInvariants (opCode : OpCode) (op : OperationPtr)
+    (ctx : WfIRContext OpCode) (opIn : op.InBounds ctx.raw) : Except String Unit :=
+  match opCode with
+  | .builtin opType => Builtin.verifyLocalInvariants opType op ctx opIn
+  | .arith opType => Arith.verifyLocalInvariants opType op ctx opIn
+  | .datapath opType => Datapath.verifyLocalInvariants opType op ctx opIn
+  | .func opType => Func.verifyLocalInvariants opType op ctx opIn
+  | .cf opType => Cf.verifyLocalInvariants opType op ctx opIn
+  | .pdl opType => PDL.verifyLocalInvariants opType op ctx opIn
+  | .test .test => pure ()
+  | .llvm opType => Llvm.verifyLocalInvariants opType op ctx opIn
+  | .mod_arith opType => Mod_Arith.verifyLocalInvariants opType op ctx opIn
+  | .riscv opType => Riscv.verifyLocalInvariants opType op ctx opIn
+  | .riscv_cf opType => Riscv_Cf.verifyLocalInvariants opType op ctx opIn
+  | .riscv_stack opType => Riscv_Stack.verifyLocalInvariants opType op ctx opIn
+  | .rv64 opType => Rv64.verifyLocalInvariants opType op ctx opIn
+  | .comb opType => Comb.verifyLocalInvariants opType op ctx opIn
+  | .hw opType => HW.verifyLocalInvariants opType op ctx opIn
+  | .felt opType => Felt.verifyLocalInvariants opType op ctx opIn
+  | .string opType => String_.verifyLocalInvariants opType op ctx opIn
+  | .include opType => Include_.verifyLocalInvariants opType op ctx opIn
+  | .ram opType => Ram.verifyLocalInvariants opType op ctx opIn
+  | .cast opType => Cast.verifyLocalInvariants opType op ctx opIn
+  | .bool opType => Bool_.verifyLocalInvariants opType op ctx opIn
+  | .constrain opType => Constrain.verifyLocalInvariants opType op ctx opIn
+  | .global opType => Global.verifyLocalInvariants opType op ctx opIn
+  | .function opType => Function_.verifyLocalInvariants opType op ctx opIn
 
-    if val > 0 then
-      let attr := IntegerAttr.mk (Int.ofNat val) (IntegerType.mk 32)
-      dict := dict.insert "overflowFlags".toUTF8 (Attribute.integerAttr attr)
-
-    dict
-  | .llvm .fadd | .llvm .fsub | .llvm .fmul | .llvm .fdiv | .llvm .frem => Id.run do
-    (Std.HashMap.emptyWithCapacity 1).insert "fastmathFlags".toUTF8 (Attribute.fastMathFlagsAttr props.attr)
-  | .arith .cmpi | .llvm .icmp => Id.run do
-    let value := IntegerAttr.mk (Int.ofNat props.predicate.toNat) (IntegerType.mk 64)
-    (Std.HashMap.emptyWithCapacity 1).insert "predicate".toUTF8 (Attribute.integerAttr value)
-  | .llvm .cond_br =>
-    let dict := (Std.HashMap.emptyWithCapacity 2).insert "branch_weights".toUTF8 (Attribute.denseArrayAttr props.branch_weights)
-    dict.insert "operandSegmentSizes".toUTF8 (Attribute.denseArrayAttr props.operandSegmentSizes)
-  | .arith .divsi | .arith .divui | .arith .shrsi | .arith .shrui |
-    .llvm .udiv | .llvm .sdiv | .llvm .lshr | .llvm .ashr => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 2
-    if props.exact then
-      dict := dict.insert "exact".toUTF8 (Attribute.unitAttr UnitAttr.mk)
-    dict
-  | .arith .ori | .llvm .or => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 2
-    if props.disjoint then
-      dict := dict.insert "disjoint".toUTF8 (Attribute.unitAttr UnitAttr.mk)
-    dict
-  | .arith .extui | .llvm .zext => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 1
-    if props.nneg then
-      dict := dict.insert "nneg".toUTF8 (Attribute.unitAttr UnitAttr.mk)
-    dict
-  | .riscv .li  | .riscv .lui | .riscv .auipc | .riscv .andi | .riscv .ori | .riscv .xori
-  | .riscv .addi | .riscv .slti | .riscv .sltiu | .riscv .addiw | .riscv .slli | .riscv .srli | .riscv .srai
-  | .riscv .slliw | .riscv .srliw | .riscv .sraiw | .riscv .rori | .riscv .roriw | .riscv .slliuw
-  | .riscv .bclri | .riscv .bexti | .riscv .binvi | .riscv .bseti | .riscv .ld | .riscv .sd
-  | .riscv .sw | .riscv .sh | .riscv .sb | .mod_arith .constant =>
-    (Std.HashMap.emptyWithCapacity 2).insert "value".toUTF8 (Attribute.integerAttr props.value)
-  | .riscv_stack .alloca => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 2
-    dict := dict.insert "alignment".toUTF8 (Attribute.integerAttr props.alignment)
-    dict.insert "value_type".toUTF8 props.value_type
-  | .riscv_cf .beq | .riscv_cf .bne | .riscv_cf .blt | .riscv_cf .bge
-  | .riscv_cf .bltu | .riscv_cf .bgeu =>
-    (Std.HashMap.emptyWithCapacity 1).insert "operandSegmentSizes".toUTF8 (Attribute.denseArrayAttr props.operandSegmentSizes)
-  | .cf .cond_br =>
-    let dict := (Std.HashMap.emptyWithCapacity 2).insert "branch_weights".toUTF8 (.denseArrayAttr props.branch_weights)
-    dict.insert "operandSegmentSizes".toUTF8 (Attribute.denseArrayAttr props.operandSegmentSizes)
-  | .llvm .alloca => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 3
-    dict := dict.insert "alignment".toUTF8 (Attribute.integerAttr props.alignment)
-    dict := dict.insert "elem_type".toUTF8 props.elem_type
-    if props.inalloca then
-      dict := dict.insert "inalloca".toUTF8 (.unitAttr UnitAttr.mk)
-    dict
-  | .llvm .load => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 10
-    dict := dict.insert "alignment".toUTF8 (.integerAttr props.alignment)
-    if props.volatile_ then
-      dict := dict.insert "volatile_".toUTF8 (.unitAttr UnitAttr.mk)
-    if props.nontemporal then
-      dict := dict.insert "nontemporal".toUTF8 (.unitAttr UnitAttr.mk)
-    if props.invariant then
-      dict := dict.insert "invariant".toUTF8 (.unitAttr UnitAttr.mk)
-    if props.invariantGroup then
-      dict := dict.insert "invariantGroup".toUTF8 (.unitAttr UnitAttr.mk)
-    if let some syncscope := props.syncscope then
-      dict := dict.insert "syncscope".toUTF8 (.stringAttr syncscope)
-    dict := dict.insert "access_groups".toUTF8 (.arrayAttr props.access_groups)
-    dict := dict.insert "alias_scopes".toUTF8 (.arrayAttr props.alias_scopes)
-    dict := dict.insert "noalias_scopes".toUTF8 (.arrayAttr props.noalias_scopes)
-    dict := dict.insert "tbaa".toUTF8 (.arrayAttr props.tbaa)
-    dict
-  | .llvm .store => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 9
-    dict := dict.insert "alignment".toUTF8 (.integerAttr props.alignment)
-    if props.volatile_ then
-      dict := dict.insert "volatile_".toUTF8 (.unitAttr UnitAttr.mk)
-    if props.nontemporal then
-      dict := dict.insert "nontemporal".toUTF8 (.unitAttr UnitAttr.mk)
-    if props.invariantGroup then
-      dict := dict.insert "invariantGroup".toUTF8 (.unitAttr UnitAttr.mk)
-    if let some syncscope := props.syncscope then
-      dict := dict.insert "syncscope".toUTF8 (.stringAttr syncscope)
-    dict := dict.insert "access_groups".toUTF8 (.arrayAttr props.access_groups)
-    dict := dict.insert "alias_scopes".toUTF8 (.arrayAttr props.alias_scopes)
-    dict := dict.insert "noalias_scopes".toUTF8 (.arrayAttr props.noalias_scopes)
-    dict := dict.insert "tbaa".toUTF8 (.arrayAttr props.tbaa)
-    dict
-  | .llvm .getelementptr => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 3
-    dict := dict.insert "rawConstantIndices".toUTF8 (Attribute.denseArrayAttr props.rawConstantIndices)
-    dict := dict.insert "elem_type".toUTF8 props.elem_type
-    dict := dict.insert "noWrapFlags".toUTF8 (.integerAttr props.noWrapFlags)
-    dict
-  | .comb .extract =>
-    (Std.HashMap.emptyWithCapacity 1).insert "lowBit".toUTF8 (Attribute.integerAttr props.lowBit)
-  | .comb .icmp =>
-    (Std.HashMap.emptyWithCapacity 1).insert "predicate".toUTF8 (Attribute.integerAttr props.predicate)
-  | .hw .constant => Id.run do
-    (Std.HashMap.emptyWithCapacity 1).insert "value".toUTF8 (Attribute.integerAttr props.value)
-  | .llvm .func => Id.run do
-    let mut dict := Std.HashMap.ofList props.extra.entries.toList
-    if let some sym_name := props.sym_name then
-      dict := dict.insert "sym_name".toUTF8 (.stringAttr sym_name)
-    if let some function_type := props.function_type then
-      dict := dict.insert "function_type".toUTF8 function_type
-    dict
-  | .llvm .module_flags => Id.run do
-    let mut dict := Std.HashMap.emptyWithCapacity 3
-    dict := dict.insert "flags".toUTF8 (Attribute.arrayAttr props.flags)
-    dict
-  | .func .call => Id.run do
-    let mut dict := Std.HashMap.ofList props.extra.entries.toList
-    dict := dict.insert "callee".toUTF8 (.flatSymbolRefAttr props.callee)
-    dict
-  | .llvm .call => Id.run do
-    let mut dict := Std.HashMap.ofList props.extra.entries.toList
-    if let some callee := props.callee then
-      dict := dict.insert "callee".toUTF8 (.flatSymbolRefAttr callee)
-    dict
-  | .func .func => Id.run do
-    let mut dict := Std.HashMap.ofList props.extra.entries.toList
-    if let some sym_name := props.sym_name then
-      dict := dict.insert "sym_name".toUTF8 (.stringAttr sym_name)
-    dict
-  | .builtin .unregistered =>
-    Std.HashMap.ofList props.properties.entries.toList
-  | .hw .module => Id.run do
-    let dict := Std.HashMap.emptyWithCapacity 4
-    let dict := dict.insert "module_type".toUTF8 (.hwModuleType props.module_type)
-    let dict := dict.insert "sym_name".toUTF8 (.stringAttr props.sym_name)
-    let dict := dict.insert "per_port_attrs".toUTF8 (.arrayAttr props.per_port_attrs)
-    let dict := dict.insert "parameters".toUTF8 (.arrayAttr props.parameters)
-    dict
-  | _ =>
-    Std.HashMap.emptyWithCapacity 0
-
-inductive RegionKind where
-| SSACFG
-| Graph
-deriving Inhabited, Repr, DecidableEq
+instance : HasOpInfo OpCode where
+  verifyLocalInvariants := OpCode.verifyLocalInvariants
+  getEffects := OpCode.getEffects
+  isConstantLike := OpCode.isConstantLike
+  propagatesPoison := OpCode.propagatesPoison
+  functionInterface? := OpCode.functionInterface?
+  getRegionKind := OpCode.getRegionKind
+  hasSSADominance := OpCode.hasSSADominance
+  hasNoTerminator := OpCode.hasNoTerminator
+  isTerminator := OpCode.isTerminator
+  isIsolatedFromAbove := OpCode.isIsolatedFromAbove
 
 /--
-  Return the kind of the region with the given index inside this operation.
-  This mirrors MLIR's RegionKindInterface default: regions are SSACFG unless
-  the operation is known to define graph regions.
+Ask the dialect of `opCode` how to represent a folded
+constant. Dialects without a materializer, and values a dialect cannot
+represent, decline to fold.
 -/
-def OpCode.getRegionKind (opCode : OpCode) (_index : Nat) : RegionKind :=
-  match opCode with
-  | .builtin .module
-  | .builtin .unregistered
-  | .test .test => .Graph
-  | _ => .SSACFG
+def OpCode.materializeConstant (opCode : OpCode) (value : RuntimeValue)
+    (type : TypeAttr) : Option (Materialized OpCode) := do
+  let materialized ←
+    match opCode with
+    | .arith op => Arith.materializeConstant op value type
+    | .comb op => Comb.materializeConstant op value type
+    | .hw op => HW.materializeConstant op value type
+    | .llvm op => Llvm.materializeConstant op value type
+    | .mod_arith op => Mod_Arith.materializeConstant op value type
+    | .riscv op => Riscv.materializeConstant op value type
+    -- Listed rather than folded into a catch-all so that adding a dialect
+    -- fails to compile until it decides how, or whether, to materialize.
+    | .riscv_cf _ | .riscv_stack _ | .rv64 _ | .cf _ | .builtin _
+    | .func _ | .datapath _ | .pdl _ | .test _
+    -- LLZK: felt folding is done by the dedicated `felt-combine` pass, which
+    -- carries its own verified rewrites; the rest have no constant form.
+    | .felt _ | .string _ | .include _ | .ram _ | .cast _
+    | .bool _ | .constrain _ | .global _ | .function _ => none
+  guard materialized.fst.isConstantLike
+  return materialized
 
 /--
-  Does this OpCode count as an MLIR basic block terminator?
+  Is this `OpCode` commutative in its operands, i.e. `op x y` always
+  computes the same value as `op y x`?
 -/
-def OpCode.isTerminator (opCode : OpCode) : Bool :=
+def OpCode.isCommutative (opCode : OpCode) : Bool :=
   match opCode with
-  | .cf .br | .cf .cond_br
-  | .func .return
-  | .function .return
-  | .llvm .br | .llvm .cond_br | .llvm .return | .llvm .unreachable
-  | .riscv_cf .branch | .riscv_cf .beq | .riscv_cf .bne
-  | .riscv_cf .blt | .riscv_cf .bge | .riscv_cf .bltu | .riscv_cf .bgeu
-  | .hw .output => true
-  | _ => false
-
-/--
-  Does this operation have effects that make it ineligible for DCE and
-  other transformations that add / remove / rearrange instructions?
-
-  NOTE: ¬ hasSideEffects does not imply that an operation is safe to
-        speculate. For that we also need it to never trigger immediate
-        UB. We'll have to deal with this later on.
-
-  Also see:
-  https://mlir.llvm.org/docs/Rationale/SideEffectsAndSpeculation/
--/
-def OperationPtr.hasSideEffects (op : OperationPtr) (ctx : IRContext OpCode) : Bool :=
-  let opCode := op.getOpType! ctx
-  if opCode.isTerminator then true else
-  match opCode with
-  -- These dialects are pure
-  | .arith _ | .comb _ | .mod_arith _ | .datapath _ | .felt _ => false
-  | .builtin .unrealized_conversion_cast => false
-  | .hw .constant => false
-  -- RISC-V is pure register arithmetic except the memory ops
-  | .riscv .ld | .riscv .sd | .riscv .sw | .riscv .sh | .riscv .sb => true
-  | .riscv _ => false
-  -- For LLVM we enumerate the pure ops
-  | .llvm .mlir__constant
+  | .arith .addi | .arith .muli
+  | .arith .andi | .arith .ori | .arith .xori
+  | .arith .maxsi | .arith .maxui | .arith .minsi | .arith .minui
+  | .arith .addui_extended
+  | .arith .mulsi_extended | .arith .mului_extended
+  | .llvm .add | .llvm .mul
   | .llvm .and | .llvm .or | .llvm .xor
-  | .llvm .add | .llvm .sub | .llvm .mul
-  | .llvm .sdiv | .llvm .udiv | .llvm .srem | .llvm .urem
-  | .llvm .shl | .llvm .lshr | .llvm .ashr
-  | .llvm .icmp | .llvm .select
-  | .llvm .trunc | .llvm .sext | .llvm .zext
-  | .llvm .getelementptr
-  | .llvm .fadd | .llvm .fsub | .llvm .fmul | .llvm .fdiv | .llvm .frem => false
-  -- Volatile loads are definitionally side-effecting
-  | .llvm .load => (op.getProperties! ctx (.llvm .load)).volatile_
-  -- For everything else: be conservative!
-  | _ => true
+  | .llvm .intr__smax | .llvm .intr__smin | .llvm .intr__umax | .llvm .intr__umin
+  | .llvm .intr__sadd__sat | .llvm .intr__uadd__sat
+  | .llvm .fadd | .llvm .fmul
+  | .riscv .add | .riscv .and | .riscv .or | .riscv .xor | .riscv .xnor
+  | .riscv .mul | .riscv .mulh | .riscv .mulhu
+  | .riscv .max | .riscv .maxu | .riscv .min | .riscv .minu
+  | .riscv .addw | .riscv .mulw
+  | .mod_arith .add | .mod_arith .mul => true
+  | _ => false

@@ -4,7 +4,7 @@
 // the typed verifier arm. Confirms the .function .«def» path is
 // reached (the unregistered fallthrough accepts any arity).
 
-// CHECK: Error verifying input program: Expected 1 region
+// CHECK: Error verifying input program: function.def: Expected 1 region
 "builtin.module"() ({
   "function.def"() <{sym_name = "bad", function_type = () -> ()}> ({
     "function.return"() : () -> ()

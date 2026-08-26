@@ -1,7 +1,7 @@
 module
 
 public import Veir.IR.Attribute
-public import Veir.Properties
+public import Veir.Dialects.Builtin.Properties
 
 namespace Veir
 

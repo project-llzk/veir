@@ -2,9 +2,11 @@ module
 
 public import Veir.Data.LLVM.Int.Basic
 public import Veir.Data.LLVM.Int.Bitblast
+public import Veir.Data.LLVM.Byte.Basic
 public import Veir.Data.RISCV.Reg.Basic
-public import Veir.Data.RISCV.Reg.Simp
+
 import all Veir.Data.LLVM.Int.Bitblast
+meta import Veir.Meta.BVDecide
 
 public section
 
@@ -29,25 +31,53 @@ def LLVM.Int.toReg (i : Veir.Data.LLVM.Int w) : Veir.Data.RISCV.Reg :=
 def RISCV.Reg.toInt (r : Veir.Data.RISCV.Reg) (w : Nat) : Veir.Data.LLVM.Int w :=
   Veir.Data.LLVM.Int.val (BitVec.zeroExtend w r.val)
 
-@[reg_toBitVec, grind =]
+@[veir_bv_normalize, grind =]
 theorem toInt_eq_val {r : Veir.Data.RISCV.Reg} :
     (RISCV.Reg.toInt r 64).getValue = r.val := by
   simp [RISCV.Reg.toInt, Veir.Data.LLVM.Int.getValue]
 
-@[reg_toBitVec, grind =]
+@[veir_bv_normalize, grind =]
 theorem toInt_isPoison {w : Nat} {r : Veir.Data.RISCV.Reg} :
     (RISCV.Reg.toInt r w).isPoison = false := by
   simp [RISCV.Reg.toInt, Veir.Data.LLVM.Int.isPoison]
 
-@[reg_toBitVec, grind =]
+@[veir_bv_normalize, grind =]
 theorem toInt_getValue {w : Nat} {r : Veir.Data.RISCV.Reg} :
     (RISCV.Reg.toInt r w).getValue = (r.val).zeroExtend w := by
   simp [RISCV.Reg.toInt, Veir.Data.LLVM.Int.getValue]
 
-@[llvm_toBitVec, grind =]
+@[veir_bv_normalize, grind =]
 theorem val_toReg {w : Nat} {i : Veir.Data.LLVM.Int w} :
     (LLVM.Int.toReg i).val = if h : i.isPoison = true then 0#64 else i.getValue.zeroExtend 64 := by
   simp only [LLVM.Int.toReg, BitVec.truncate_eq_setWidth]
   split
   · simp [Veir.Data.LLVM.Int.isPoison]
-  · simp [llvm_toBitVec]
+  · simp [veir_bv_normalize]
+
+@[simp, grind =]
+theorem toReg_toInt_64 {r : Veir.Data.RISCV.Reg} :
+    LLVM.Int.toReg (RISCV.Reg.toInt r 64) = r := by
+  simp [LLVM.Int.toReg, RISCV.Reg.toInt]
+
+/--
+  Cast `LLVM.Byte` to `RISCV.Reg`.
+-/
+def LLVM.Byte.toReg (b : Veir.Data.LLVM.Byte w) : Veir.Data.RISCV.Reg :=
+  ⟨b.val.zeroExtend 64⟩
+
+/--
+  Cast `RISCV.Reg` to `LLVM.Byte`.
+-/
+@[grind]
+def RISCV.Reg.toByte (r : Veir.Data.RISCV.Reg) (w : Nat) : Veir.Data.LLVM.Byte w :=
+  ⟨BitVec.zeroExtend w r.val, 0, by simp⟩
+
+@[veir_bv_normalize, grind =]
+theorem toByte_eq_val {r : Veir.Data.RISCV.Reg} :
+    (RISCV.Reg.toByte r 64).val = r.val := by
+  simp [RISCV.Reg.toByte]
+
+@[veir_bv_normalize, grind =]
+theorem toByte_val {w : Nat} {r : Veir.Data.RISCV.Reg} :
+    (RISCV.Reg.toByte r w).val = (r.val).zeroExtend w := by
+  simp [RISCV.Reg.toByte]

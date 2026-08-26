@@ -1,10 +1,10 @@
 // RUN: veir-opt %s -p=isel-riscv64 | filecheck %s
 
 // Single-dynamic-index `llvm.getelementptr` lowers to `ptr + idx * scale`,
-// where `scale` is the byte size of the element type.
+// where `scale` is the allocation size (ABI stride) of the element type.
 
 "builtin.module"() ({
-    "func.func"()  <{function_type = (!llvm.ptr, i64) -> ()}> ({
+    "func.func"()  <{function_type = (!llvm.ptr, i64) -> (), sym_name = "foo"}> ({
     ^bb0(%p: !llvm.ptr, %i: i64):
         // scale 1 (i8): ptr + idx -> riscv.add
         %g1 = "llvm.getelementptr"(%p, %i) <{elem_type = i8, rawConstantIndices = array<i32: -2147483648>}> : (!llvm.ptr, i64) -> !llvm.ptr
@@ -22,6 +22,13 @@
 
         // scale 4 (i32): (idx << 2) + ptr -> riscv.sh2add
         %g4 = "llvm.getelementptr"(%p, %i) <{elem_type = i32, rawConstantIndices = array<i32: -2147483648>}> : (!llvm.ptr, i64) -> !llvm.ptr
+        // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (!llvm.ptr) -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (i64) -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "riscv.sh2add"(%{{.*}}, %{{.*}}) : (!riscv.reg, !riscv.reg) -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (!riscv.reg) -> !llvm.ptr
+
+        // i24 has store size 3 but RV64 allocation stride 4: also riscv.sh2add
+        %g24 = "llvm.getelementptr"(%p, %i) <{elem_type = i24, rawConstantIndices = array<i32: -2147483648>}> : (!llvm.ptr, i64) -> !llvm.ptr
         // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (!llvm.ptr) -> !riscv.reg
         // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (i64) -> !riscv.reg
         // CHECK-NEXT: %{{.*}} = "riscv.sh2add"(%{{.*}}, %{{.*}}) : (!riscv.reg, !riscv.reg) -> !riscv.reg
@@ -58,6 +65,26 @@
         // CHECK-NEXT: %{{.*}} = "riscv.add"(%{{.*}}, %{{.*}}) : (!riscv.reg, !riscv.reg) -> !riscv.reg
         // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (!riscv.reg) -> !llvm.ptr
 
+        // scale 0: a zero-sized element type also satisfies `scale &&& (scale - 1) == 0`, so it must
+        // not take the power-of-two path -- `Nat.log2 0 = 0` would emit `idx << 0`, i.e. `ptr + idx`
+        // instead of `ptr`. It takes the `li`/`mul` path, computing `ptr + idx * 0 = ptr`.
+        %g0 = "llvm.getelementptr"(%p, %i) <{elem_type = !llvm.array<0 x i32>, rawConstantIndices = array<i32: -2147483648>}> : (!llvm.ptr, i64) -> !llvm.ptr
+        // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (!llvm.ptr) -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (i64) -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "riscv.li"() <{"value" = 0 : i64}> : () -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "riscv.mul"(%{{.*}}, %{{.*}}) : (!riscv.reg, !riscv.reg) -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "riscv.add"(%{{.*}}, %{{.*}}) : (!riscv.reg, !riscv.reg) -> !riscv.reg
+        // CHECK-NEXT: %{{.*}} = "builtin.unrealized_conversion_cast"(%{{.*}}) : (!riscv.reg) -> !llvm.ptr
+
+        "test.test"(%g1) : (!llvm.ptr) -> ()
+        "test.test"(%g2) : (!llvm.ptr) -> ()
+        "test.test"(%g4) : (!llvm.ptr) -> ()
+        "test.test"(%g24) : (!llvm.ptr) -> ()
+        "test.test"(%g8) : (!llvm.ptr) -> ()
+        "test.test"(%garr) : (!llvm.ptr) -> ()
+        "test.test"(%g16) : (!llvm.ptr) -> ()
+        "test.test"(%g3) : (!llvm.ptr) -> ()
+        "test.test"(%g0) : (!llvm.ptr) -> ()
         "func.return"() : () -> ()
     }) : () -> ()
 }) : () -> ()

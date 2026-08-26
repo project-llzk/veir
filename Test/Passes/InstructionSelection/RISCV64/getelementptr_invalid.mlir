@@ -3,7 +3,7 @@
 // Negative tests: these cases are not lowered, we leave them for future work.
 
 "builtin.module"() ({
-    "func.func"()  <{function_type = (!llvm.ptr, i32, i64) -> ()}> ({
+    "func.func"()  <{function_type = (!llvm.ptr, i32, i64) -> (), sym_name = "foo"}> ({
     ^bb0(%p: !llvm.ptr, %i32: i32, %i: i64):
         // non-i64 index
         %a = "llvm.getelementptr"(%p, %i32) <{elem_type = i64, rawConstantIndices = array<i32: -2147483648>}> : (!llvm.ptr, i32) -> !llvm.ptr
@@ -17,6 +17,9 @@
         %c = "llvm.getelementptr"(%p) <{elem_type = i64, rawConstantIndices = array<i32: 5>}> : (!llvm.ptr) -> !llvm.ptr
         // CHECK-NEXT: %{{.*}} = "llvm.getelementptr"(%{{.*}}) <{"elem_type" = i64, "noWrapFlags" = 0 : i32, "rawConstantIndices" = array<i32: 5>}> : (!llvm.ptr) -> !llvm.ptr
 
+        "test.test"(%a) : (!llvm.ptr) -> ()
+        "test.test"(%b) : (!llvm.ptr) -> ()
+        "test.test"(%c) : (!llvm.ptr) -> ()
         "func.return"() : () -> ()
     }) : () -> ()
 }) : () -> ()

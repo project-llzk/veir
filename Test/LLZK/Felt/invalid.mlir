@@ -5,7 +5,7 @@
 // path is reached. (Felt landed before invalid.mlir was a standard;
 // this test was added during the Tier-1 review pass for consistency.)
 
-// CHECK: Error verifying input program: Expected 2 operands
+// CHECK: Error verifying input program: felt.add: Expected 2 operand(s)
 "builtin.module"() ({
 ^bb0(%a: !felt.type):
   %0 = "felt.add"(%a) : (!felt.type) -> !felt.type

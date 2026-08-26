@@ -1,4 +1,10 @@
-import Veir.Interpreter.Refinement.Basic
+module
+
+public import Veir.Interpreter.Refinement.Basic
+
+import all Veir.Interpreter.Refinement.Basic
+
+public section
 
 namespace Veir
 open Veir.Data
@@ -9,20 +15,47 @@ variable {OpInfo : Type} [HasOpInfo OpInfo]
 
 @[simp, grind .]
 theorem RuntimeValue.isRefinedBy_refl (v : RuntimeValue) : v ⊒ v := by
-  cases v <;> simp [RuntimeValue.isRefinedBy]
+  cases v <;> grind [RuntimeValue.isRefinedBy]
 
 @[simp, grind .]
 theorem RuntimeValue.arrayIsRefinedBy_refl (a : Array RuntimeValue) : a ⊒ a := by
   simp [arrayIsRefinedBy]
 
 @[simp, grind .]
+theorem RuntimeValue.arrayIsRefinedBy_nil :
+    #[] ⊒ #[] := by
+  simp [arrayIsRefinedBy]
+
+@[simp, grind =]
+theorem RuntimeValue.arrayIsRefinedBy_singleton {a b : RuntimeValue} :
+    #[a] ⊒ #[b] ↔ a ⊒ b := by
+  simp [arrayIsRefinedBy]
+
+@[simp, grind =]
+theorem RuntimeValue.arrayIsRefinedBy_cons {a b : RuntimeValue} {as bs : List RuntimeValue} :
+    List.toArray (a :: as) ⊒ List.toArray (b :: bs) ↔
+    a ⊒ b ∧ List.toArray as ⊒ List.toArray bs := by
+  simp [arrayIsRefinedBy]
+  constructor
+  · rintro ⟨h₁, h₂⟩
+    grind [h₂ 0]
+  · grind
+
+@[simp, grind .]
+theorem MemoryState.isRefinedBy_refl (m : MemoryState) :
+    m ⊒ m := by
+  simp only [isRefinedBy]
+  bv_normalize
+  grind
+
+@[simp, grind .]
 theorem FunctionResult.isRefinedBy_refl (r : MemoryState × Array RuntimeValue) : r ⊒ r := by
   simp [FunctionResult.isRefinedBy]
 
 @[simp, grind .]
-theorem Interp.isRefinedBy_refl_of_ne_none {α : Type} {R : α → α → Prop}
-    (hR : ∀ a, R a a) (x : Interp α) (neNone : x ≠ none) : Interp.isRefinedBy R x x := by
-  rcases x with _ | (x | _) <;> grind [Interp.isRefinedBy]
+theorem Interp.isRefinedBy_refl_of_ne_fail {α : Type} {R : α → α → Prop}
+    (hR : ∀ a, R a a) (x : Interp α) (neFail : x ≠ .fail) : Interp.isRefinedBy R x x := by
+  rcases x with _ | _ | x <;> grind [Interp.isRefinedBy]
 
 @[simp, grind .]
 theorem VariableState.isRefinedBy_refl
@@ -51,7 +84,18 @@ theorem ControlFlowAction.optionIsRefinedBy_refl (cf : Option ControlFlowAction)
 
 theorem RuntimeValue.isRefinedBy_trans {v₁ v₂ v₃ : RuntimeValue}
     (h12 : v₁ ⊒ v₂) (h23 : v₂ ⊒ v₃) : v₁ ⊒ v₃ := by
-  grind [RuntimeValue.isRefinedBy, isRefinedBy_trans, cases RuntimeValue]
+  cases v₁ <;>
+    grind [RuntimeValue.isRefinedBy, isRefinedBy_trans,
+      cases RuntimeValue, LLVM.Byte.isRefinedBy_trans]
+
+theorem MemoryState.isRefinedBy_trans {m1 m2 m3 : MemoryState}
+    (h12 : m1 ⊒ m2) (h23 : m2 ⊒ m3) : m1 ⊒ m3 := by
+  simp only [isRefinedBy] at *
+  intro addr
+  specialize h12 addr
+  specialize h23 addr
+  bv_normalize
+  grind
 
 theorem RuntimeValue.arrayIsRefinedBy_trans {a b c : Array RuntimeValue}
     (h12 : a ⊒ b) (h23 : b ⊒ c) : a ⊒ c := by
@@ -83,3 +127,105 @@ theorem OperationPtr.isModuleRefinedBy_trans
     (h23 : isModuleRefinedBy mod₂ ctx₂ mod₃ ctx₃) :
     isModuleRefinedBy mod₁ ctx₁ mod₃ ctx₃ := by
   grind [isModuleRefinedBy, isRefinedByAsFunction_trans]
+
+/-! ## Inversion
+
+Inversion lemmas for `RuntimeValue.isRefinedBy`: given a refinement hypothesis `v ⊒ tv`
+where the source value `v` has a known constructor, these lemmas recover the shape of the
+target value `tv`.
+-/
+
+/--
+A runtime value `tv` that refines an integer runtime value `v` is itself an integer of the same
+width, and the underlying integer value refines `v`.
+-/
+theorem RuntimeValue.int_of_isRefinedBy {bw : Nat} {v : Data.LLVM.Int bw} {tv : RuntimeValue}
+    (h : RuntimeValue.int bw v ⊒ tv) :
+    ∃ t : Data.LLVM.Int bw, tv = RuntimeValue.int bw t ∧ v ⊒ t := by
+  cases tv <;> grind [RuntimeValue.isRefinedBy]
+
+/--
+A runtime value `tv` that refines a byte runtime value `v` is itself a byte of the same
+width, and the underlying byte value refines `v`.
+-/
+theorem RuntimeValue.byte_of_isRefinedBy {bw : Nat} {v : Data.LLVM.Byte bw} {tv : RuntimeValue}
+    (h : RuntimeValue.byte bw v ⊒ tv) :
+    ∃ t : Data.LLVM.Byte bw, tv = RuntimeValue.byte bw t ∧ v ⊒ t := by
+  cases tv <;> grind [RuntimeValue.isRefinedBy]
+
+/-- A runtime value `tv` that refines a float runtime value `v` is equal to it. -/
+theorem RuntimeValue.float_of_isRefinedBy {bw : Nat} {v : Float} {tv : RuntimeValue}
+    (h : RuntimeValue.float bw v ⊒ tv) :
+    tv = RuntimeValue.float bw v := by
+  cases tv <;> grind [RuntimeValue.isRefinedBy]
+
+/-- A runtime value `tv` that refines an address runtime value `v` is equal to it. -/
+theorem RuntimeValue.addr_of_isRefinedBy {v : UInt64} {tv : RuntimeValue}
+    (h : RuntimeValue.addr v ⊒ tv) :
+    tv = RuntimeValue.addr v := by
+  cases tv <;> grind [RuntimeValue.isRefinedBy]
+
+/-- A runtime value `tv` that refines a register runtime value `v` is equal to it. -/
+theorem RuntimeValue.reg_of_isRefinedBy {v : Data.RISCV.Reg} {tv : RuntimeValue}
+    (h : RuntimeValue.reg v ⊒ tv) :
+    tv = RuntimeValue.reg v := by
+  cases tv <;> grind [RuntimeValue.isRefinedBy]
+
+/-! ## Interp refinements -/
+
+/-- `fail` is refined by any value. -/
+@[simp, grind .]
+theorem Interp.isRefinedBy_fail_target :
+    Interp.isRefinedBy R .fail target := by
+  simp [Interp.isRefinedBy]
+
+/-- `ub` is refined by any value. -/
+@[simp, grind .]
+theorem Interp.isRefinedBy_ub_target :
+    Interp.isRefinedBy R (.ub) target := by
+  simp only [Interp.isRefinedBy]
+
+/-- `ok` is only refined by `ok` values that satisfy the given refinement relation. -/
+@[simp, grind =]
+theorem Interp.isRefinedBy_ok_target_iff :
+    Interp.isRefinedBy R (.ok sourceRes) target ↔
+    ∃ targetRes, target = .ok targetRes ∧ R sourceRes targetRes := by
+  simp only [Interp.isRefinedBy]
+  rcases target with _ | (_ | _) <;> grind
+
+/-! ## ValueMapping -/
+
+/-- Applying a value mapping to an array preserves its size. -/
+@[simp, grind =]
+theorem ValueMapping.applyToArray_size {ctx ctx' : WfIRContext OpInfo} (mapping : ValueMapping ctx ctx')
+    (vals : Array ValuePtr) (valsIn : ∀ v ∈ vals, v.InBounds ctx.raw) :
+    (mapping.applyToArray vals valsIn).size = vals.size := by
+  simp [ValueMapping.applyToArray]
+
+/-- Extensibility theorem for value mappings mapping `op` results to `op'` results. -/
+theorem ValueMapping.applyToArray_getResults!_ext
+    {ctx ctx' : WfIRContext OpInfo} {op op' : OperationPtr}
+    {mapping : ValueMapping ctx ctx'}
+    (opIn : op.InBounds ctx.raw)
+    (hResults : mapping.applyToArray (op.getResults! ctx.raw) = op'.getResults! ctx'.raw) :
+    ∀ (i : Nat) (hi : i < op.getNumResults! ctx.raw),
+      (mapping ⟨op.getResult i, (by grind)⟩).val = op'.getResult i := by
+  intro i hi
+  simp only [applyToArray, Array.ext_iff, Array.size_map, Array.size_attach,
+    OperationPtr.getResults!.size_eq_getNumResults!, Array.getElem_map,
+    Array.getElem_attach] at hResults
+  grind
+
+/-- If a value mapping reflects results from `op` to `op'`, then values that are not in
+`op` results are not mapped to values in `op'` results. -/
+@[grind .]
+theorem ValueMapping.ReflectsResults.not_mem_getResults
+    {ctx ctx' : WfIRContext OpInfo} {mapping : ValueMapping ctx ctx'} {op op' : OperationPtr}
+    {val : ValuePtr} (valIn : val.InBounds ctx.raw)
+    (hReflect : mapping.ReflectsResults op op')
+    (hNotMem : val ∉ op.getResults! ctx.raw) :
+    (mapping ⟨val, valIn⟩).val ∉ op'.getResults! ctx'.raw := by
+  intro hmem
+  simp only [OperationPtr.getResults!.mem_iff_exists_index] at hmem
+  have ⟨index, hindex, heq⟩ := hmem
+  grind [OperationPtr.getResults!.mem_iff_exists_index, hReflect val valIn index heq.symm]

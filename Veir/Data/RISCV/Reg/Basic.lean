@@ -1,7 +1,5 @@
 module
 
-import all Veir.Data.RISCV.Reg.Simp
-
 namespace Veir.Data.RISCV
 
 public section
@@ -143,8 +141,8 @@ def sub (rs2 : Reg) (rs1 : Reg) : Reg :=
   ⟨rs1.val - rs2.val⟩
 
 /--
-  Performs logical left shift on the value in register rs1 by the shift amount held in the lower 5
-  bits of register rs2.
+  Performs logical left shift on the value in register rs1 by the shift amount held in the lower 6
+  bits of register rs2 in RV64.
 -/
 def sll (rs2 : Reg) (rs1 : Reg) : Reg :=
 
@@ -172,8 +170,8 @@ def xor (rs2 : Reg) (rs1 : Reg) : Reg :=
   ⟨rs1.val ^^^ rs2.val⟩
 
 /--
-  Logical right shift on the value in register rs1 by the shift amount held in the lower 5 bits of
-  register rs2.
+  Logical right shift on the value in register rs1 by the shift amount held in the lower 6 bits of
+  register rs2 in RV64.
 -/
 def srl (rs2 : Reg) (rs1 : Reg) : Reg :=
 
@@ -182,7 +180,7 @@ def srl (rs2 : Reg) (rs1 : Reg) : Reg :=
 
 /--
   Performs arithmetic right shift on the value in register rs1 by the shift amount held in the
-  lower 5 bits of register rs2.
+  lower 6 bits of register rs2 in RV64.
 -/
 def sra (rs2 : Reg) (rs1 : Reg) : Reg :=
   ⟨BitVec.sshiftRight' rs1.val (BitVec.extractLsb 5 0 rs2.val)⟩
@@ -703,6 +701,20 @@ def packh (rs2 : Reg) (rs1 : Reg) : Reg :=
 def packw (rs2 : Reg) (rs1 : Reg) : Reg :=
   ⟨BitVec.signExtend 64
     ((BitVec.extractLsb 15 0 rs2.val) ++ (BitVec.extractLsb 15 0 rs1.val))⟩
+
+/-! ## Zicond: Integer conditional operations -/
+
+/--
+  If the condition rs2 is equal to zero, writes zero to rd; otherwise copies rs1 to rd.
+-/
+def czeroeqz (rs2 : Reg) (rs1 : Reg) : Reg :=
+  ⟨if rs2.val == 0 then 0 else rs1.val⟩
+
+/--
+  If the condition rs2 is nonzero, writes zero to rd; otherwise copies rs1 to rd.
+-/
+def czeronez (rs2 : Reg) (rs1 : Reg) : Reg :=
+  ⟨if rs2.val != 0 then 0 else rs1.val⟩
 
 /-! ## Zbkc: Carry-less multiplication for Cryptography -/
 

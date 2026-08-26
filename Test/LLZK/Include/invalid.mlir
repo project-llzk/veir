@@ -7,7 +7,7 @@
 // accepts any arity), so seeing this exact message confirms the typed
 // `.include Include_.from` path is reached.
 
-// CHECK: Error verifying input program: Expected 0 results
+// CHECK: Error verifying input program: include.from: Expected 0 result(s)
 "builtin.module"() ({
   %0 = "include.from"() <{sym_name = "lib_a", path = "lib_a.llzk"}> : () -> (i32)
 }) : () -> ()

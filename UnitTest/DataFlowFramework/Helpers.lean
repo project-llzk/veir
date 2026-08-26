@@ -1,5 +1,4 @@
-import Veir.Analysis.DataFlowFramework
-import Veir.Analysis.DataFlow.Domains
+import Veir.Analysis.DataFlow.DeadCodeAnalysis
 import Veir.Parser.MlirParser
 
 open Std (HashMap)
@@ -23,12 +22,12 @@ def renderReport (report : MismatchReport) : String :=
 /--
 Parse one top level MLIR operation together with the parser state that owns its IR context.
 -/
-def parseTopLevelOp (s : String) : Except String (OperationPtr × MlirParserState) := do
+def parseTopLevelOp (s : String) : Except String (OperationPtr × MlirParserState OpCode) := do
   let some (ctx, _) := WfIRContext.create OpCode
     | throw "internal error: failed to create IR context"
   let parserState ← (ParserState.fromInput s.toByteArray).mapError toString
   let (op, mlirState, _) ←
-    ((parseOp none).run (MlirParserState.fromContext ctx) parserState).mapError toString
+    (Veir.Parser.parseTopLevelOp.run (MlirParserState.fromContext ctx) parserState).mapError toString
   pure (op, mlirState)
 
 /--
@@ -78,19 +77,19 @@ Collect all blocks reachable by recursively traversing nested regions in source 
 -/
 partial def collectBlocksInSourceOrder
     (op : OperationPtr)
-    (irCtx : IRContext OpCode)
+    (irCtx : WfIRContext OpCode)
     (acc : Array BlockPtr := #[]) : Array BlockPtr := Id.run do
   let mut acc := acc
-  for region in (op.get! irCtx).regions do
-    let region := region.get! irCtx
+  for region in (op.get! irCtx.raw).regions do
+    let region := region.get! irCtx.raw
     let mut currentBlock := region.firstBlock
     while let some block := currentBlock do
       acc := acc.push block
-      let mut currentOp := (block.get! irCtx).firstOp
+      let mut currentOp := (block.get! irCtx.raw).firstOp
       while let some nestedOp := currentOp do
         acc := collectBlocksInSourceOrder nestedOp irCtx acc
-        currentOp := (nestedOp.get! irCtx).next
-      currentBlock := (block.get! irCtx).next
+        currentOp := (nestedOp.get! irCtx.raw).next
+      currentBlock := (block.get! irCtx.raw).next
   acc
 
 /--
@@ -100,22 +99,22 @@ operation results inside each region.
 -/
 partial def collectValuesInSourceOrder
     (top : OperationPtr)
-    (irCtx : IRContext OpCode)
+    (irCtx : WfIRContext OpCode)
     (acc : Array ValuePtr := #[]) : Array ValuePtr := Id.run do
   let mut acc := acc
-  for result in top.getResults! irCtx do
+  for result in top.getResults! irCtx.raw do
     acc := acc.push result
-  for region in (top.get! irCtx).regions do
-    let region := region.get! irCtx
+  for region in (top.get! irCtx.raw).regions do
+    let region := region.get! irCtx.raw
     let mut currentBlock := region.firstBlock
     while let some block := currentBlock do
-      for arg in block.getArguments! irCtx do
+      for arg in block.getArguments! irCtx.raw do
         acc := acc.push arg
-      let mut currentOp := (block.get! irCtx).firstOp
+      let mut currentOp := (block.get! irCtx.raw).firstOp
       while let some nestedOp := currentOp do
         acc := collectValuesInSourceOrder nestedOp irCtx acc
-        currentOp := (nestedOp.get! irCtx).next
-      currentBlock := (block.get! irCtx).next
+        currentOp := (nestedOp.get! irCtx.raw).next
+      currentBlock := (block.get! irCtx.raw).next
   acc
 
 /--
@@ -130,7 +129,7 @@ Recover block and SSA value maps by pairing MLIR source names with IR traversal 
 -/
 def recoverNames
     (top : OperationPtr)
-    (irCtx : IRContext OpCode)
+    (irCtx : WfIRContext OpCode)
     (mlir : String) : Except String RecoveredNames := do
   let blockLabels := blockLabelsFromMlir mlir
   let blocks := collectBlocksInSourceOrder top irCtx
@@ -158,7 +157,8 @@ render any test mismatches produced by `check`.
 def runWithAnalyses
     (mlir : String)
     (analyses : Array DataFlowAnalysis)
-    (check : OperationPtr -> DataFlowContext -> MlirParserState -> MismatchReport) : String := Id.run do
+    (check : OperationPtr -> DataFlowContext -> MlirParserState OpCode -> MismatchReport) :
+    String := Id.run do
   match parseTopLevelOp mlir with
   | .error err =>
       return s!"parse failed: {err}"

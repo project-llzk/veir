@@ -4,7 +4,7 @@
 // "Expected 0 results" arm. (The op is a constraint emission with no
 // SSA value.)
 
-// CHECK: Error verifying input program: Expected 0 results
+// CHECK: Error verifying input program: constrain.eq: Expected 0 result(s)
 "builtin.module"() ({
 ^bb0(%a: !felt.type, %b: !felt.type):
   %0 = "constrain.eq"(%a, %b) : (!felt.type, !felt.type) -> i32

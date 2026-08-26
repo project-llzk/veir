@@ -1,11 +1,8 @@
 module
 
-public import Veir.IR.Basic
 public import Veir.IR.WellFormed
 
 import all Veir.IR.Basic -- TODO: encapsulate
-import Veir.ForLean
-import Veir.IR.Fields
 import Veir.IR.GetSet
 import Veir.IR.Grind
 import Veir.IR.InBounds
@@ -24,7 +21,7 @@ public section
 
 namespace Veir
 
-variable {OpInfo : Type} [HasOpInfo OpInfo]
+variable {OpInfo : Type} [IsOpCode OpInfo]
 variable {ctx : IRContext OpInfo}
 
 @[expose, irreducible]

@@ -1,70 +1,163 @@
 module
 
+public import Veir.IR.OpCode
+public import Veir.IR.WellFormed
+
 namespace Veir
 
 public section
 
-class HasDialectOpInfo (opCode: Type)
-    extends Hashable opCode, Repr opCode, Inhabited opCode where
-  propertiesOf : opCode → Type
-  propertiesHash {op : opCode} : Hashable (propertiesOf op) := by
-    simp only [properties_of]
-    intros opCode; cases opCode <;>
-    ((try rename_i op; cases op) <;> infer_instance)
-  propertiesDefault {op : opCode} : Inhabited (propertiesOf op) := by
-    simp only [properties_of]
-    intros opCode; cases opCode <;>
-    ((try rename_i op; cases op) <;> infer_instance)
-  propertiesRepr {op : opCode} : Repr (propertiesOf op) := by
-    simp only [properties_of]
-    intros opCode; cases opCode <;>
-    ((try rename_i op; cases op) <;> infer_instance)
-  propertiesDecideEq {op : opCode} : DecidableEq (propertiesOf op) := by
-    simp only [properties_of]
-    intros opCode; cases opCode <;>
-    ((try rename_i op; cases op) <;> infer_instance)
-  decideEq : DecidableEq (opCode) := by
-    intros opCode1 opCode2; cases opCode1 <;> cases opCode2 <;> infer_instance
+inductive RegionKind where
+| SSACFG
+| Graph
+deriving Inhabited, Repr, DecidableEq
 
-instance [HasDialectOpInfo opCode] {op : opCode} : Hashable (HasDialectOpInfo.propertiesOf op) where
-  hash := HasDialectOpInfo.propertiesHash.hash
+/-- The memory effects an operation may have. -/
+structure MemoryEffects where
+  /-- The operation may dereference memory, without necessarily mutating it. -/
+  reads : Bool
+  /-- The operation may mutate memory, without necessarily dereferencing it. -/
+  writes : Bool
+  /--
+  The operation may allocate memory, without necessarily reading or writing it.
+  -/
+  allocates : Bool
+deriving Inhabited, Repr, DecidableEq
 
-instance [HasDialectOpInfo opCode] {op : opCode} : Inhabited (HasDialectOpInfo.propertiesOf op) where
-  default := HasDialectOpInfo.propertiesDefault.default
+namespace MemoryEffects
 
-instance [HasDialectOpInfo opCode] {op : opCode} : Repr (HasDialectOpInfo.propertiesOf op) where
-  reprPrec := HasDialectOpInfo.propertiesRepr.reprPrec
+def none : MemoryEffects := { reads := false, writes := false, allocates := false }
 
-instance [HasDialectOpInfo opCode] {op : opCode} : DecidableEq (HasDialectOpInfo.propertiesOf op) :=
-  HasDialectOpInfo.propertiesDecideEq
+def read : MemoryEffects := { reads := true, writes := false, allocates := false }
 
-instance [HasDialectOpInfo opCode] : DecidableEq opCode :=
-  HasDialectOpInfo.decideEq
+def write : MemoryEffects := { reads := false, writes := true, allocates := false }
+
+def readWrite : MemoryEffects := { reads := true, writes := true, allocates := false }
+
+def allocate : MemoryEffects := { reads := false, writes := false, allocates := true }
+
+/-- A conservative summary for an operation whose memory effects are unknown. -/
+def unknown : MemoryEffects :=
+  { reads := true, writes := true, allocates := true }
+
+end MemoryEffects
+
+/-- Information exposed by operations that behave like functions. -/
+structure FunctionOpInterface (Properties : Type) where
+  /-- Return the symbol name of the function. -/
+  getSymName : Properties → StringAttr
+  /-- Return the type of the function. -/
+  getFunctionType : Properties → FunctionType
+  /-- Return the properties with the function type replaced. -/
+  setFunctionType : Properties → FunctionType → Properties
+
+class HasOpInfo (opCode: Type)
+    extends IsOpCode opCode where
+  /--
+  Verify the local invariants of an operation. This typically includes checking
+  that the number of operands, successors, results, and regions match the
+  expected values for the operation type, as well as checking that referenced
+  types are in bounds.
+  -/
+  verifyLocalInvariants :
+    (opType : opCode) → (op : OperationPtr) → (ctx : WfIRContext opCode) →
+    (opIn : op.InBounds ctx.raw) → Except String PUnit :=
+      fun _ _ _ _ => pure ()
+  /--
+  The memory effects of an operation with this opcode and these properties,
+  mirroring MLIR's `MemoryEffectOpInterface::getEffects`.
+  -/
+  getEffects : (op : opCode) → propertiesOf op → MemoryEffects :=
+    fun _ _ => .unknown
+  /--
+  Whether an operation with this opcode materializes a literal constant
+  value: no operands, one result, no side effects, and a result that is
+  always determined by the operation's properties. Defaults to `false`
+  for every opcode, which conservatively treats nothing as constant.
+  -/
+  isConstantLike : opCode → Bool := fun _ => false
+  /--
+  Whether an operation with this opcode produces a wholly poisoned result
+  whenever any one of its operands is wholly poison, mirroring LLVM's
+  `propagatesPoison`. Defaults to `false` for every opcode, which
+  conservatively propagates nothing.
+  -/
+  propagatesPoison : opCode → Bool := fun _ => false
+  /--
+  Information about operations that act like functions.
+  -/
+  functionInterface? : (op : opCode) → Option (FunctionOpInterface (propertiesOf op)) :=
+    fun _ => none
+  /--
+  Return the kind of the indexed region inside an operation with this opcode.
+  This mirrors MLIR's `RegionKindInterface` default: regions are SSACFG unless
+  the operation is known to define graph regions.
+  -/
+  getRegionKind : opCode → Nat → RegionKind := fun _ _ => .SSACFG
+  /--
+  Whether definitions in the indexed region must dominate their uses. A false
+  result denotes graph-style semantics, where only a single block can be in the
+  region, and operation order does not impose SSA dominance.
+  -/
+  hasSSADominance : opCode → Nat → Bool
+  /--
+  Whether the indexed region is exempt from the requirement that each of its
+  blocks ends in a terminator, mirroring MLIR's `NoTerminator` trait.
+
+  This is deliberately separate from the region kind. A graph region implies
+  no terminator, but the converse does not hold: MLIR gives `pdl.rewrite` a
+  body that is an ordinary SSACFG region and yet carries `NoTerminator`.
+  Encoding such a region as a graph region would silently drop SSA dominance
+  from the model in order to relax an unrelated requirement.
+
+  Defaults to `false` for every opcode, which conservatively keeps the
+  terminator requirement.
+  -/
+  hasNoTerminator : opCode → Nat → Bool := fun _ _ => false
+  /--
+  Does this OpCode count as an MLIR basic block terminator?
+  -/
+  isTerminator : opCode → Bool := fun _ => false
+  /--
+  Whether this operation has MLIR's `IsolatedFromAbove` trait. Operations in
+  each of its regions may only use values defined in that region or one of its
+  nested regions.
+  -/
+  isIsolatedFromAbove : opCode → Bool := fun _ => false
+
+variable {OpInfo : Type} [HasOpInfo OpInfo]
+
+/-- Verify the local invariants of an operation using its opcode interface. -/
+@[inline]
+abbrev OperationPtr.verifyLocalInvariants (op : OperationPtr) (ctx : WfIRContext OpInfo)
+    (opIn : op.InBounds ctx.raw) : Except String PUnit :=
+  HasOpInfo.verifyLocalInvariants (op.getOpType ctx.raw opIn) op ctx opIn
 
 /--
-The `HasOpInfo` type class provides information about opcodes and their properties
-and how to hash, represent, and compare them for equality. It also
-provides a type family `propertyOf` that maps an operation code to the type of
-its properties
+  Whether this region is exempt from the requirement that each of its blocks
+  ends in a terminator.
 -/
-class HasOpInfo (opCode: Type)
-    extends Hashable opCode, Repr opCode, Inhabited opCode, HasDialectOpInfo opCode where
-  moduleOpCode: opCode
+@[expose, inline]
+public def RegionPtr.hasNoTerminator (region : RegionPtr) (ctx : WfIRContext OpInfo) : Bool :=
+  match (region.get! ctx.raw).parent with
+  | some parentOp =>
+    let parent := parentOp.get! ctx.raw
+    HasOpInfo.hasNoTerminator parent.opType (parent.regions.idxOf region)
+  | none => false
 
-instance [HasOpInfo opCode] {op : opCode} : Hashable (HasOpInfo.propertiesOf op) where
-  hash := HasOpInfo.propertiesHash.hash
-
-instance [HasOpInfo opCode] {op : opCode} : Inhabited (HasOpInfo.propertiesOf op) where
-  default := HasOpInfo.propertiesDefault.default
-
-instance [HasOpInfo opCode] {op : opCode} : Repr (HasOpInfo.propertiesOf op) where
-  reprPrec := HasOpInfo.propertiesRepr.reprPrec
-
-instance [HasOpInfo opCode] {op : opCode} : DecidableEq (HasOpInfo.propertiesOf op) :=
-  HasOpInfo.propertiesDecideEq
-
-instance [HasOpInfo opCode] : DecidableEq opCode :=
-  HasOpInfo.decideEq
+/--
+Find the region that establishes the nearest `IsolatedFromAbove` scope around
+`region`, or `none` when no enclosing operation is isolated. The returned
+region is one of the isolated operation's direct regions; different regions of
+the same isolated operation are separate scopes.
+-/
+public partial def RegionPtr.nearestIsolatedScope?
+    (region : RegionPtr) (ctx : IRContext OpInfo) : Option RegionPtr := do
+  let parentOp ← (region.get! ctx).parent
+  if HasOpInfo.isIsolatedFromAbove (parentOp.get! ctx).opType then
+    return region
+  let parentRegion ← parentOp.getParentRegion! ctx
+  parentRegion.nearestIsolatedScope? ctx
 
 end -- public section
 

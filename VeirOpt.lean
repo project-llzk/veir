@@ -1,18 +1,21 @@
 import Veir.Parser.MlirParser
-import Veir.Parser.ParserError
 import Veir.Printer
-import Veir.IR.Basic
-import Veir.Verifier
-import Veir.Properties
-import Veir.Pass
+import Veir.Panic
 
 import Veir.Passes.PrintIR
 import Veir.Passes.InstCombine
 import Veir.Passes.CSE
 import Veir.Passes.InstructionSelection.RISCV64
+import Veir.Passes.InstructionSelection.RISCV64Sdag
+import Veir.Passes.InstructionSelection.RISCV64Branches
 import Veir.Passes.DCE.dce
 import Veir.Passes.CastsReconciliation.Reconciliation
-import Veir.Passes.Combines.Combine
+import Veir.Passes.FunctionBoundaryCoercion.Coercion
+import Veir.Passes.RISCVCombines.Combine
+import Veir.Passes.ModArithToArith
+import Veir.Passes.ArithToLLVM
+import Veir.Passes.Canonicalize
+import Veir.Passes.Legalization
 import Veir.Passes.Felt.Combine
 
 open Veir.Parser
@@ -23,15 +26,61 @@ open Veir
   A map of all available compilation passes, keyed by their unique names.
 -/
 def availablePasses : Std.HashMap String (Pass OpCode) :=
-  (Std.HashMap.emptyWithCapacity 1)
-    |>.insert PrintIRPass.name PrintIRPass
-    |>.insert InstCombinePass.name InstCombinePass
-    |>.insert CSEPass.name CSEPass
-    |>.insert IselRISCV64.name IselRISCV64
-    |>.insert DCEPass.name DCEPass
-    |>.insert CastReconcilePass.name CastReconcilePass
-    |>.insert RISCV.Combine.name RISCV.Combine
-    |>.insert FeltPass.Combine.name FeltPass.Combine
+  ([ PrintIRPass,
+     InstCombinePass,
+     CSEPass,
+     IselRISCV64,
+     IselSDAG,
+     IselBrRISCV64,
+     DCEPass,
+     CastReconcilePass,
+     CoerceFunctionBoundariesToRiscvRegPass,
+     CoerceModArithFunctionBoundariesPass,
+     RISCV.Combine,
+     ModArithToArithPass,
+     ArithToLLVMPass,
+     CanonicalizePass,
+     LegalizePass,
+     FeltPass.Combine ] : List (Pass OpCode)).foldl
+    (fun m pass => m.insert pass.name pass)
+    (Std.HashMap.emptyWithCapacity 16)
+
+/--
+  A map of named pass groups, each expanding to a comma-separated pipeline of pass names.
+  A group name may be used wherever a pass name is expected in a `-p` list and expands
+  in place to its member passes. If a name is both a pass and a group, the pass wins.
+-/
+def passGroups : Std.HashMap String String :=
+  (Std.HashMap.emptyWithCapacity 2)
+    |>.insert "O" "canonicalize,instcombine,cse,dce"
+    |>.insert "mod-arith"
+        "mod-arith-to-arith{barrett},cse,coerce-mod-arith-function-boundaries,reconcile-cast,canonicalize,cse,dce"
+    |>.insert "mod-arith-pow2-width"
+        "mod-arith-to-arith{barrett pow2-width},cse,coerce-mod-arith-function-boundaries{pow2-width},reconcile-cast,canonicalize,cse,dce"
+    |>.insert "riscv"
+        "legalize,isel-sdag-riscv64,isel-br-riscv64,isel-riscv64,coerce-function-boundaries-to-riscv-reg,reconcile-cast,riscv-combine,dce"
+
+/--
+  A human-readable description of every pass group and the passes it expands to,
+  used in the usage message.
+-/
+def passGroupsUsage : String :=
+  String.intercalate "\n"
+    ((passGroups.toList.toArray.qsort (·.1 < ·.1)).toList.map fun (name, passes) =>
+      s!"    {name}: {passes}")
+
+/--
+  A human-readable description of the options taken by those passes that have any,
+  used in the usage message. Passes without options are omitted.
+-/
+def passOptionsUsage : String :=
+  let withOptions := (availablePasses.values.toArray.qsort (·.name < ·.name)).toList.filter
+    (!·.options.isEmpty)
+  String.intercalate "\n" (withOptions.flatMap fun pass =>
+    s!"    {pass.name}:" ::
+      (pass.options.toList.toArray.qsort (·.1 < ·.1)).toList.map fun (name, option) =>
+        let defaultValue := if option.defaultValue then "true" else "false"
+        s!"      {name} (default: {defaultValue}): {option.description}")
 
 /--
   Arguments for the `veir-opt` command-line tool, parsed from the CLI.
@@ -43,41 +92,78 @@ structure VeirOptArgs where
   passes : PassPipeline OpCode
   /-- Whether to accept ops/types/attrs from unregistered dialects. -/
   allowUnregisteredDialect : Bool
+  /-- Whether to disable IR verification -/
+  disableVerifiers : Bool
 
 /--
-  Parse the `-p` flag to construct a pass pipeline.
-  Returns an error if the flag is malformed or if any pass name is unknown.
+  Replace every pass-group name in a pipeline string by the passes it stands for, leaving
+  everything else alone. Names that are neither a pass nor a group are left in place so
+  that `PassPipeline.ofString?` reports them. Groups do not take options.
 -/
-def parsePipelineOption (args : List String) : Except String (PassPipeline OpCode) := do
-  let passesFlags := args.filter (·.startsWith "-p=")
-  match passesFlags with
-  | [] => return { passes := #[] }
-  | [flag] =>
+def expandPassGroups (pipeline : String) : Except String String := do
+  let elements ← (pipeline.splitOn ",").mapM fun element => do
+    let (name, options) ← splitPipelineElement element
+    if availablePasses.contains name then return element
+    match passGroups.get? name with
+    | none => return element
+    | some expansion =>
+      unless options.isEmpty do
+        throw s!"pass group '{name}' does not take options"
+      return expansion
+  return String.intercalate "," elements
+
+/--
+  Parse the `-p` flags to construct a pass pipeline.
+  `-p` takes a comma-separated list of pass names and pass-group names; a group name
+  (see `passGroups`) expands in place to its member passes. A pass name may be followed by
+  a brace-enclosed, space-separated list of boolean options, as in
+  `pass{opt1 opt2=false}`. Bare option names mean `true`; omitted options take their declared
+  defaults. The flag may appear any number of times; the resulting pipeline
+  is the concatenation of their passes, in the order the flags appear on the command line.
+  Returns an error if a flag is malformed, if any name is neither a pass nor a group, or if
+  a pass is given an option it does not accept.
+-/
+def parsePipelineOption (args : List String) :
+    Except String (PassPipeline OpCode × List String) := do
+  let (pipelineFlags, rest) := args.partition (·.startsWith "-p=")
+  let mut passes : Array (Pass OpCode × PassOptions) := #[]
+  for flag in pipelineFlags do
     let arg := (flag.drop 3).toString
-    match PassPipeline.ofString? availablePasses arg with
-    | .ok pipeline => return pipeline
-    | .error errMsg => .error s!"Error parsing -p flag: {errMsg}"
-  | _ => .error "Expected at most one -p flag."
+    let expanded ← match expandPassGroups arg with
+      | .ok expanded => pure expanded
+      | .error errMsg => throw s!"Error parsing -p flag: {errMsg}"
+    match PassPipeline.ofString? availablePasses expanded with
+    | .ok pipeline => passes := passes ++ pipeline.passes
+    | .error errMsg => throw s!"Error parsing -p flag: {errMsg}"
+  return ({ passes }, rest)
 
 /--
   Parse CLI arguments. Returns an error if the arguments are malformed.
 -/
 def parseArgs (args : List String) : Except String VeirOptArgs := do
   let (flags, positional) := args.partition (·.startsWith "-")
-  -- Parses the `-p` flag if present.
-  let pipeline ← parsePipelineOption flags
+  -- Consume any `-p` flags.
+  let (pipeline, flags) ← parsePipelineOption flags
+  -- Consume `--allow-unregistered-dialect` if present.
   let allowUnregisteredDialect := flags.contains "--allow-unregistered-dialect"
+  let flags := flags.filter (· != "--allow-unregistered-dialect")
+  -- Consume `--disable-verifiers` if present.
+  let disableVerifiers := flags.contains "--disable-verifiers"
+  let flags := flags.filter (· != "--disable-verifiers")
+  -- If anything survived, it was unrecognized and we error out.
+  if let some flag := flags.head? then
+    .error s!"Unrecognized flag '{flag}'."
 
   if positional.length == 0 then -- read from stdin
-    return { filename := none, passes := pipeline, allowUnregisteredDialect }
+    return { filename := none, passes := pipeline, allowUnregisteredDialect, disableVerifiers }
 
   let [filename] := positional
     | .error "Expected exactly one positional argument for the input filename."
 
   if filename == "-" then
-    return { filename := none, passes := pipeline, allowUnregisteredDialect }
+    return { filename := none, passes := pipeline, allowUnregisteredDialect, disableVerifiers }
 
-  return { filename := some filename, passes := pipeline, allowUnregisteredDialect }
+  return { filename := some filename, passes := pipeline, allowUnregisteredDialect, disableVerifiers }
 
 def getFileContent (filename : Option String) : ExceptT String IO ByteArray := do
   if let some f := filename then
@@ -99,7 +185,7 @@ def parseOperation (filename : Option String) (allowUnregisteredDialect : Bool :
   match ParserState.fromInput fileContent with
   | .ok parser =>
     let state := MlirParserState.fromContext ctx allowUnregisteredDialect
-    match (parseOp none).run state parser with
+    match parseTopLevelOp.run state parser with
     | .ok (op, state, _) =>
       return (state.ctx, op)
     | .error err =>
@@ -109,25 +195,32 @@ def parseOperation (filename : Option String) (allowUnregisteredDialect : Bool :
 
 set_option warn.sorry false in
 def main (args : List String) : IO Unit := do
+  enableExitOnPanic
   match parseArgs args with
   | .error errMsg =>
     IO.eprintln s!"Error: {errMsg}"
-    IO.eprintln "Usage: veir-opt <filename> [-p=\"pass1,pass2,...\"] [--allow-unregistered-dialect]"
+    IO.eprintln "Usage: veir-opt <filename> [-p=\"pass1,pass2,...\"]... [--allow-unregistered-dialect] [--disable-verifiers]"
+    IO.eprintln "  -p may be repeated; passes run in the order the flags appear."
+    IO.eprintln "  A pass name may be followed by boolean options: pass{opt1 opt2=false}."
+    IO.eprintln "  Bare option names mean true; omitted options take their declared defaults."
+    IO.eprintln "  The passes taking options are:"
+    IO.eprintln passOptionsUsage
+    IO.eprintln "  A pass list may also contain pass-group names, which expand in place:"
+    IO.eprintln passGroupsUsage
     IO.Process.exit 1
-  | .ok { filename, passes, allowUnregisteredDialect } =>
+  | .ok { filename, passes, allowUnregisteredDialect, disableVerifiers } =>
     match ← parseOperation filename allowUnregisteredDialect with
     | .error errMsg =>
       IO.eprintln errMsg
       IO.Process.exit 1
     | .ok (ctx, op) =>
-      match ctx.verify with
-      | .error errMsg =>
-        IO.eprintln s!"Error verifying input program: {errMsg}"
-        IO.Process.exit 1
-      | .ok _ =>
-        match ← passes.run ⟨ctx, by sorry⟩ op with
-        | .error errMsg =>
-          IO.eprintln s!"Error: {errMsg}"
+      if !disableVerifiers then
+        if let .error errMsg := ctx.verify op then
+          IO.eprintln s!"Error verifying input program: {errMsg}"
           IO.Process.exit 1
-        | .ok finalCtx =>
-          Veir.Printer.printOperation finalCtx op
+      match ← passes.run ⟨ctx, by sorry⟩ op disableVerifiers with
+      | .error errMsg =>
+        IO.eprintln s!"Error: {errMsg}"
+        IO.Process.exit 1
+      | .ok finalCtx =>
+        Veir.Printer.printOperation finalCtx.raw op

@@ -130,6 +130,15 @@ macro "#assert " e:term : command =>
 #assert expectSuccessAttr "false" (IntegerAttr.mk 0 (IntegerType.mk 1))
 #assert expectSuccessAttr "true" (IntegerAttr.mk 1 (IntegerType.mk 1))
 
+/-! ## Integer overflow flags attributes -/
+
+#assert expectSuccessAttr "#arith.overflow<none>" (ArithIntegerOverflowFlagsAttr.mk false false)
+#assert expectSuccessAttr "#arith.overflow<nsw>" (ArithIntegerOverflowFlagsAttr.mk true false)
+#assert expectSuccessAttr "#arith.overflow<nuw>" (ArithIntegerOverflowFlagsAttr.mk false true)
+#assert expectSuccessAttr "#arith.overflow<nsw, nuw>" (ArithIntegerOverflowFlagsAttr.mk true true)
+#assert expectErrorAttr "#arith.overflow<>"
+  "expected integer overflow flag to be one of: none, nsw, nuw" (some 16)
+
 /-! ## String attributes -/
 
 #assert expectSuccessAttr "\"hello\"" (StringAttr.mk "hello".toByteArray)
@@ -210,6 +219,21 @@ macro "#assert " e:term : command =>
 #assert expectErrorType "!mod_arith.int<17>" "Expected punctuation ':'" (some 17)
 #assert expectErrorType "!mod_arith.int<17 : x>" "integer type expected after ':' in integer attribute" (some 20)
 
+/-! ## PDL handle types -/
+#assert expectSuccessType "!pdl.attribute" (PDL.AttributeType.mk)
+#assert expectSuccessType "!pdl.range<value>" (PDL.RangeType.mk .value)
+#assert expectSuccessType "!pdl.range<attribute>" (PDL.RangeType.mk .attribute)
+#assert expectSuccessAttr "!pdl.attribute" (PDL.AttributeType.mk)
+
+#assert expectSuccessType "!pdl.operation" (PDL.OperationType.mk)
+#assert expectSuccessAttr "!pdl.operation" (PDL.OperationType.mk)
+
+#assert expectSuccessType "!pdl.value" (PDL.ValueType.mk)
+#assert expectSuccessAttr "!pdl.value" (PDL.ValueType.mk)
+
+#assert expectSuccessType "!pdl.type" (PDL.TypeType.mk)
+#assert expectSuccessAttr "!pdl.type" (PDL.TypeType.mk)
+
 /-! ## LLVM Pointer type -/
 #assert expectSuccessType "!llvm.ptr" (LLVM.PointerType.mk)
 
@@ -219,6 +243,39 @@ macro "#assert " e:term : command =>
 /-! ## LLVM Array type -/
 #assert expectSuccessType "!llvm.array<2 x i32>" (LLVM.ArrayType.mk 2 $ IntegerType.mk 32)
 #assert expectSuccessAttr "!llvm.array<2 x !llvm.array<3x i64>>" (LLVM.ArrayType.mk 2 $ LLVM.ArrayType.mk 3 $ IntegerType.mk 64)
+
+/-! ## LLVM Byte type -/
+#assert expectSuccessType "!llvm.byte<64>" (LLVM.ByteType.mk 64)
+
+/-! ## LLVM Struct type (parsed opaquely; see `parseOptionalLLVMStructType`)
+
+  The struct type is handled by a dedicated parser that accepts both the
+  standalone `!llvm.struct<...>` form and the bare `struct<...>` form used when a
+  struct is nested inside another LLVM type (e.g. an array element). Both forms
+  are normalized to the full `!llvm.struct<...>` spelling, and neither requires
+  `allowUnregisteredDialect` (like `!llvm.array`). The struct name, fields, and
+  packed flag are *not* modeled structurally — they survive only as text. -/
+
+-- Standalone struct: both forms parse identically, with or without the flag.
+#assert expectSuccessType "!llvm.struct<(i32, f32)>"
+  ⟨UnregisteredAttr.mk "!llvm.struct<(i32, f32)>" true, by grind⟩ false
+#assert expectSuccessType "!llvm.struct<(i32, f32)>"
+  ⟨UnregisteredAttr.mk "!llvm.struct<(i32, f32)>" true, by grind⟩ true
+-- Literal struct nested in an array (original `!llvm.array<N x struct<...>>` bug).
+#assert expectSuccessType "!llvm.array<2 x struct<(i32, f32)>>"
+  (LLVM.ArrayType.mk 2 (UnregisteredAttr.mk "!llvm.struct<(i32, f32)>" true : Attribute)) true
+#assert expectSuccessType "!llvm.array<2 x struct<(i32, f32)>>"
+  (LLVM.ArrayType.mk 2 (UnregisteredAttr.mk "!llvm.struct<(i32, f32)>" true : Attribute)) false
+-- The bare nested form and the prefixed nested form are equivalent.
+#assert expectSuccessType "!llvm.array<2 x !llvm.struct<(i32, f32)>>"
+  (LLVM.ArrayType.mk 2 (UnregisteredAttr.mk "!llvm.struct<(i32, f32)>" true : Attribute)) false
+-- Identified (named) struct: the name is preserved verbatim inside the text.
+#assert expectSuccessType "!llvm.array<23 x struct<\"struct.et_info\", (i8, i8)>>"
+  (LLVM.ArrayType.mk 23
+    (UnregisteredAttr.mk "!llvm.struct<\"struct.et_info\", (i8, i8)>" true : Attribute)) true
+-- Packed struct nested in an array.
+#assert expectSuccessType "!llvm.array<4 x struct<packed (i8, i32)>>"
+  (LLVM.ArrayType.mk 4 (UnregisteredAttr.mk "!llvm.struct<packed (i8, i32)>" true : Attribute)) true
 
 /-! ## LLVM Function type -/
 #assert expectSuccessType "!llvm.func<i32 (i32)>"
@@ -278,6 +335,7 @@ macro "#assert " e:term : command =>
 
 /-! ## RISCV Register type -/
 #assert expectSuccessType "!riscv.reg" (RegisterType.mk)
+#assert expectSuccessType "!riscv.reg<x13>" (RegisterType.mk (some 13))
 
 /-! ## Flat symbol reference attribute -/
 #assert expectSuccessAttr "@foo" (FlatSymbolRefAttr.mk "@foo")

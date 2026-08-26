@@ -5,7 +5,7 @@
 // any arity, so the message's presence confirms the .string
 // String_.new path is reached.
 
-// CHECK: Error verifying input program: Expected 1 result
+// CHECK: Error verifying input program: string.new: Expected 1 result(s)
 "builtin.module"() ({
 ^bb0():
   %0:2 = "string.new"() <{value = "hello"}> : () -> (!string.type, !string.type)

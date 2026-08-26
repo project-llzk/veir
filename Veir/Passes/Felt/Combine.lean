@@ -92,6 +92,6 @@ def Combine.impl (ctx : WfIRContext OpCode) (op : OperationPtr) (_ : op.InBounds
 public def Combine : Pass OpCode :=
   { name := "felt-combine"
     description := "Felt-dialect peephole combines (Tier 1+2: identities, constant folds, telescoping)"
-    run := Combine.impl }
+    run := fun _ => Combine.impl }
 
 end Veir.FeltPass

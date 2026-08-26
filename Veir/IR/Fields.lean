@@ -3,11 +3,10 @@ module
 public import Veir.IR.Basic
 import Veir.IR.InBounds
 import Veir.IR.GetSet
-public import Veir.Prelude
 
 namespace Veir
 
-variable {OpInfo : Type} [HasOpInfo OpInfo]
+variable {OpInfo : Type} [IsOpCode OpInfo]
 variable {ctx : IRContext OpInfo}
 
 public section
@@ -418,13 +417,13 @@ theorem ValuePtr.getFirstUse!_inBounds :
 
 grind_pattern ValuePtr.getFirstUse!_inBounds => (value.getFirstUse! ctx), ctx.FieldsInBounds
 
-theorem ValuePtr.getDefiningOp!_inBounds :
+theorem ValuePtr.definingOp?_inBounds :
     ctx.FieldsInBounds →
     value.InBounds ctx →
-    (value.getDefiningOp! ctx).maybe OperationPtr.InBounds ctx := by
+    value.definingOp?.maybe OperationPtr.InBounds ctx := by
   cases value <;> grind
 
-grind_pattern ValuePtr.getDefiningOp!_inBounds => (value.getDefiningOp! ctx), ctx.FieldsInBounds
+grind_pattern ValuePtr.definingOp?_inBounds => value.definingOp?, ctx.FieldsInBounds
 
 end ValuePtr
 
@@ -697,8 +696,12 @@ theorem OperationPtr.pushResult_fieldsInBounds {newResult : OpResult} {op : Oper
   prove_fieldsInBounds
 
 @[grind .]
-theorem OperationPtr.setProperties_fieldsInBounds :
-    ctx.FieldsInBounds → (setProperties op ctx newProperties inBounds hprop).FieldsInBounds := by
+theorem OperationPtr.setProperties_fieldsInBounds
+    {Dialect : Type} [IsOpCode Dialect] [HasDialect OpInfo Dialect]
+    {op : OperationPtr} {inBounds : op.InBounds ctx}
+    {opCode : Dialect} {newProperties : propertiesOf opCode}
+    {hprop : op.getOpType! ctx = opCode} :
+    ctx.FieldsInBounds → (setProperties op ctx opCode newProperties inBounds hprop).FieldsInBounds := by
   prove_fieldsInBounds_operation ctx
 
 @[grind .]
@@ -720,6 +723,8 @@ theorem OperationPtr.pushBlockOperand_push_fieldsInBounds
 attribute [local grind] Operation.empty in
 @[grind .]
 theorem OperationPtr.allocEmpty_fieldsInBounds
+    {Dialect : Type} [IsOpCode Dialect] [HasDialect OpInfo Dialect]
+    {type : Dialect} {prop : propertiesOf type}
     (heq : allocEmpty ctx type prop = some (ctx', ptr')) :
     ctx.FieldsInBounds → ctx'.FieldsInBounds := by
   prove_fieldsInBounds
@@ -851,7 +856,7 @@ theorem OpResultPtr.setFirstUse_fieldsInBounds_maybe (hnew : newFirstUse.maybe O
   prove_fieldsInBounds_operation ctx
 
 @[grind .]
-theorem RegionPtr.setParent_fieldsInBounds (hnew : newParent.InBounds ctx) :
+theorem RegionPtr.setParent_fieldsInBounds (hnew : newParent.maybe OperationPtr.InBounds ctx) :
     ctx.FieldsInBounds → (setParent region ctx newParent h).FieldsInBounds := by
   prove_fieldsInBounds_region ctx
 

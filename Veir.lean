@@ -3,13 +3,33 @@ import Veir.Data
 import Veir.IR.Basic
 import Veir.IR.Fields
 import Veir.IR.WellFormed
+import Veir.IRNesting
 import Veir.Rewriter.LinkedList.WellFormed
 import Veir.Rewriter.WellFormed
 import Veir.Rewriter.InlineBlock
 import Veir.Rewriter.WfRewriter
+import Veir.PatternRewriter.Semantics
 import Veir.Printer
 import Veir.PatternRewriter.Basic
+import Veir.PatternRewriter.Puddle
+import Veir.Interfaces.FoldInterfaces
+import Veir.Interfaces.ControlFlowInterfaces
+import Veir.Passes.ArithToLLVM.Proofs
+import Veir.Passes.Canonicalize.Proofs
+import Veir.Passes.RISCVCombines.Proofs
 import Veir.Benchmarks
 import Veir.Parser.Lexer
 import Veir.Interpreter
 import Veir.Dominance
+import Veir.Passes.InstructionSelection.Proofs
+import Veir.Passes.CastsReconciliation.Reconciliation
+import Veir.Passes.Legalization.Proofs
+
+-- FIXME: These modules are otherwise orphans and would not be compiled.
+import Veir.Analysis.DataFlow.SparseFact
+import Veir.Data.FP.EScientificBV
+import Veir.Data.FP.EScientificBV.Basic
+import Veir.Data.FP.EScientificBV.ToExtRat
+import Veir.Data.FP.ExtRat
+import Veir.Data.FP.FP
+import Veir.Interfaces

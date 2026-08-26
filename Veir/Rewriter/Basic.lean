@@ -1,8 +1,7 @@
 module
 
-public import Veir.IR
-public import Veir.Rewriter.InsertPoint
 public import Veir.Rewriter.LinkedList
+public import Veir.Dialects.Builtin.OpInfo
 
 public section
 namespace Veir
@@ -14,7 +13,7 @@ variable {ctx : IRContext OpInfo}
 - Insert an operation at a given location.
 -/
 @[irreducible]
-def Rewriter.insertOp? (ctx: IRContext OpInfo) (newOp: OperationPtr) (insertionPoint: InsertPoint)
+def Rewriter.insertOp (ctx: IRContext OpInfo) (newOp: OperationPtr) (insertionPoint: InsertPoint)
     (newOpIn: newOp.InBounds ctx := by grind)
     (insIn : insertionPoint.InBounds ctx)
     (ctxInBounds: ctx.FieldsInBounds) : Option (IRContext OpInfo) :=
@@ -23,20 +22,20 @@ def Rewriter.insertOp? (ctx: IRContext OpInfo) (newOp: OperationPtr) (insertionP
     let next := insertionPoint.next
     newOp.linkBetweenWithParent ctx prev next parent (by grind) (by grind) (by grind) (by grind)
 
-theorem Rewriter.insertOp?_inBounds_mono (ptr : GenericPtr)
-    (heq : insertOp? ctx newOp ip h₁ h₂ h₃ = some newCtx) :
+theorem Rewriter.insertOp_inBounds_mono (ptr : GenericPtr)
+    (heq : insertOp ctx newOp ip h₁ h₂ h₃ = some newCtx) :
     ptr.InBounds newCtx ↔ ptr.InBounds ctx := by
-  simp only [insertOp?] at heq
+  simp only [insertOp] at heq
   grind
 
-grind_pattern Rewriter.insertOp?_inBounds_mono =>
-  Rewriter.insertOp? ctx newOp ip h₁ h₂ h₃, some newCtx, ptr.InBounds newCtx
+grind_pattern Rewriter.insertOp_inBounds_mono =>
+  Rewriter.insertOp ctx newOp ip h₁ h₂ h₃, some newCtx, ptr.InBounds newCtx
 
 @[grind .]
-theorem Rewriter.insertOp?_fieldsInBounds_mono
-    (heq : insertOp? ctx newOp ip h₁ h₂ h₃ = some newCtx) :
+theorem Rewriter.insertOp_fieldsInBounds_mono
+    (heq : insertOp ctx newOp ip h₁ h₂ h₃ = some newCtx) :
     ctx.FieldsInBounds → newCtx.FieldsInBounds := by
-  simp only [insertOp?] at heq
+  simp only [insertOp] at heq
   grind
 
 /--
@@ -240,7 +239,7 @@ theorem Rewriter.eraseOp_inBounds (ptr : GenericPtr)
 - Insert a block at a given location.
 -/
 @[irreducible]
-def Rewriter.insertBlock? (ctx: IRContext OpInfo) (newBlock: BlockPtr)
+def Rewriter.insertBlock (ctx: IRContext OpInfo) (newBlock: BlockPtr)
     (insertionPoint: BlockInsertPoint)
     (newBlockIn: newBlock.InBounds ctx := by grind)
     (insIn : insertionPoint.InBounds ctx := by grind)
@@ -251,17 +250,17 @@ def Rewriter.insertBlock? (ctx: IRContext OpInfo) (newBlock: BlockPtr)
     newBlock.linkBetweenWithParent ctx prev next parent (by grind) (by grind) (by grind) (by grind)
 
 @[grind .]
-theorem Rewriter.insertBlock?_inBounds (ptr : GenericPtr)
-    (heq : insertBlock? ctx newBlock ip h₁ h₂ h₃ = some newCtx) :
+theorem Rewriter.insertBlock_inBounds (ptr : GenericPtr)
+    (heq : insertBlock ctx newBlock ip h₁ h₂ h₃ = some newCtx) :
     ptr.InBounds ctx ↔ ptr.InBounds newCtx := by
-  simp only [insertBlock?] at heq
+  simp only [insertBlock] at heq
   grind
 
 @[grind .]
-theorem Rewriter.insertBlock?_fieldsInBounds_mono
-    (heq : insertBlock? ctx newBlock ip h₁ h₂ h₃ = some newCtx) :
+theorem Rewriter.insertBlock_fieldsInBounds_mono
+    (heq : insertBlock ctx newBlock ip h₁ h₂ h₃ = some newCtx) :
     ctx.FieldsInBounds → newCtx.FieldsInBounds := by
-  simp only [insertBlock?] at heq
+  simp only [insertBlock] at heq
   grind
 
 def Rewriter.replaceUse (ctx: IRContext OpInfo) (use : OpOperandPtr) (newValue: ValuePtr)
@@ -286,6 +285,54 @@ theorem Rewriter.replaceUse_fieldsInBounds :
      ctx.FieldsInBounds → (replaceUse ctx use newValue useIn newIn ctxIn).FieldsInBounds := by
   grind [replaceUse]
 
+/-- Set the attributes of an operation. -/
+def Rewriter.setAttributes (ctx: IRContext OpInfo) (op: OperationPtr) (newAttrs : DictionaryAttr)
+    (opIn : op.InBounds ctx := by grind) : IRContext OpInfo :=
+  op.setAttributes ctx newAttrs opIn
+
+@[grind =]
+theorem Rewriter.setAttributes_inBounds (ptr : GenericPtr) :
+    ptr.InBounds (setAttributes ctx op newAttrs opIn) ↔ ptr.InBounds ctx := by
+  grind [setAttributes]
+
+@[grind .]
+theorem Rewriter.setAttributes_fieldsInBounds :
+    ctx.FieldsInBounds → (setAttributes ctx op newAttrs opIn).FieldsInBounds := by
+  grind [setAttributes]
+
+section Rewriter.setProperties
+
+variable {Dialect : Type} [HasOpInfo Dialect] [HasDialect OpInfo Dialect]
+variable {opCode : Dialect}
+
+/--
+Set the properties of an operation of type `opCode`.
+The implicitely passed `opCode` can either be of the global `OpInfo` type, or the dialect-specific
+`Dialect` type. The `OpInfo` version is often the one used when manipulating generic operations,
+while the `Dialect` version is often easier to use when manipulating dialect-specific operations.
+-/
+def Rewriter.setProperties (ctx: IRContext OpInfo) (op: OperationPtr)
+    (opCode : Dialect := by grind)
+    (newProps: propertiesOf opCode)
+    (opIn : op.InBounds ctx := by grind)
+    (hprop : op.getOpType! ctx = opCode := by grind) : IRContext OpInfo :=
+  op.setProperties ctx opCode newProps opIn hprop
+
+variable {op : OperationPtr} {newProperties : propertiesOf opCode}
+variable {opIn : op.InBounds ctx} {hprop : op.getOpType! ctx = opCode}
+
+@[grind =]
+theorem Rewriter.setProperties_inBounds (ptr : GenericPtr) :
+    ptr.InBounds (setProperties ctx op opCode newProperties opIn hprop) ↔ ptr.InBounds ctx := by
+  grind [setProperties]
+
+@[grind .]
+theorem Rewriter.setProperties_fieldsInBounds :
+    ctx.FieldsInBounds → (setProperties ctx op opCode newProperties opIn hprop).FieldsInBounds := by
+  grind [setProperties]
+
+end Rewriter.setProperties
+
 /--
 Set the type of a value (an op result or a block argument).
 -/
@@ -301,7 +348,7 @@ theorem Rewriter.setType_inBounds (ptr : GenericPtr) :
 @[grind .]
 theorem Rewriter.setType_fieldsInBounds :
     ctx.FieldsInBounds → (setType ctx value newType valueIn).FieldsInBounds := by
-  grind [setType, ValuePtr.setType_fieldsInBounds]
+  grind [setType]
 
 @[irreducible]
 def Rewriter.replaceValue? (ctx: IRContext OpInfo) (oldValue: ValuePtr) (newValue: ValuePtr)
@@ -534,7 +581,7 @@ def Rewriter.createBlock (ctx: IRContext OpInfo) (argTypes : Array TypeAttr)
   let ctx := Rewriter.initBlockArguments ctx newBlockPtr argTypes
   match h : insertionPoint with
   | some insertionPoint => do
-    let ctx ← Rewriter.insertBlock? ctx newBlockPtr insertionPoint
+    let ctx ← Rewriter.insertBlock ctx newBlockPtr insertionPoint
       (by grind) (by grind [cases BlockInsertPoint]) (by grind)
     (ctx, newBlockPtr)
   | none =>
@@ -878,9 +925,16 @@ theorem Rewriter.initBlockOperands_inBounds_mono (ptr : GenericPtr) :
     grind
 
 @[irreducible]
-def Rewriter.createEmptyOp (ctx : IRContext OpInfo) (opType : OpInfo) (properties : HasOpInfo.propertiesOf opType) :
+def Rewriter.createEmptyOp {Dialect : Type} [HasOpInfo Dialect]
+    [HasDialect OpInfo Dialect] (ctx : IRContext OpInfo) (opType : Dialect)
+    (properties : propertiesOf opType) :
     Option (IRContext OpInfo × OperationPtr) :=
   OperationPtr.allocEmpty ctx opType properties
+
+section Rewriter.createEmptyOp
+
+variable {Dialect : Type} [HasOpInfo Dialect] [HasDialect OpInfo Dialect]
+variable {opType : Dialect} {properties : propertiesOf opType}
 
 @[grind .]
 theorem Rewriter.createEmptyOp_new_inBounds
@@ -896,7 +950,7 @@ theorem Rewriter.createEmptyOp_new_not_inBounds
 
 @[grind =>]
 theorem Rewriter.createEmptyOp_genericPtr_mono (ptr : GenericPtr)
-    (heq : createEmptyOp ctx type properties = some (ctx', ptr')) :
+    (heq : createEmptyOp ctx opType properties = some (ctx', ptr')) :
     ptr.InBounds ctx' ↔ (ptr.InBounds ctx ∨ ptr = .operation ptr') := by
   grind [createEmptyOp]
 
@@ -906,10 +960,13 @@ theorem Rewriter.createEmptyOp_fieldsInBounds
     ctx.FieldsInBounds → ctx'.FieldsInBounds := by
   grind [createEmptyOp]
 
+end Rewriter.createEmptyOp
+
 @[irreducible]
-def Rewriter.createOp (ctx: IRContext OpInfo) (opType: OpInfo)
+def Rewriter.createOp {Dialect : Type} [HasOpInfo Dialect]
+    [HasDialect OpInfo Dialect] (ctx: IRContext OpInfo) (opType: Dialect)
     (resultTypes: Array TypeAttr) (operands: Array ValuePtr) (blockOperands : Array BlockPtr)
-    (regions: Array RegionPtr) (properties: HasOpInfo.propertiesOf opType)
+    (regions: Array RegionPtr) (properties: propertiesOf opType)
     (insertionPoint: Option InsertPoint)
     (hoper : ∀ oper, oper ∈ operands → oper.InBounds ctx := by grind)
     (hblockOperands : ∀ oper, oper ∈ blockOperands → oper.InBounds ctx := by grind)
@@ -927,11 +984,16 @@ def Rewriter.createOp (ctx: IRContext OpInfo) (opType: OpInfo)
   let ctx := Rewriter.initBlockOperands ctx newOpPtr blockOperands (hoperands := by grind (ematch := 10))
   match _ : insertionPoint with
   | some insertionPoint =>
-    rlet ctx ← Rewriter.insertOp? ctx newOpPtr insertionPoint (by grind)
+    rlet ctx ← Rewriter.insertOp ctx newOpPtr insertionPoint (by grind)
       (by cases insertionPoint <;> grind) (by grind) in
     some (ctx, newOpPtr)
   | none =>
     (ctx, newOpPtr)
+
+section Rewriter.createOp
+
+variable {Dialect : Type} [HasOpInfo Dialect] [HasDialect OpInfo Dialect]
+variable {opType : Dialect} {props : propertiesOf opType}
 
 @[grind .]
 theorem Rewriter.createOp_inBounds_mono (ptr : GenericPtr)
@@ -961,21 +1023,26 @@ theorem Rewriter.createOp_fieldsInBounds
   simp only [createOp] at heq
   grind
 
+end Rewriter.createOp
+
 @[irreducible]
-def IRContext.create OpInfo [HasOpInfo OpInfo] : Option (IRContext OpInfo × OperationPtr) :=
+def IRContext.create OpInfo [HasOpInfo OpInfo] [HasDialect OpInfo Builtin]
+    : Option (IRContext OpInfo × OperationPtr) :=
   rlet (ctx, region) ← Rewriter.createRegion (empty OpInfo)
-  rlet (ctx, operation) ← Rewriter.createOp ctx HasOpInfo.moduleOpCode #[] #[] #[] #[region] default none
+  rlet (ctx, operation) ← Rewriter.createOp ctx Builtin.module #[] #[] #[] #[region] default none
   rlet (ctx, block) ← Rewriter.createBlock ctx #[] (some (.atEnd region)) (by grind) (by grind)
   return (ctx, operation)
 
 @[grind →]
-theorem IRContext.create_fieldsInBounds {op: OperationPtr} (h : IRContext.create OpInfo = some (ctx, op)) :
+theorem IRContext.create_fieldsInBounds {op: OperationPtr} [HasDialect OpInfo Builtin]
+    (h : IRContext.create OpInfo = some (ctx, op)) :
     ctx.FieldsInBounds := by
   simp only [IRContext.create] at h
   grind
 
 @[grind →]
-theorem IRContext.create_inBounds {op: OperationPtr} (h : IRContext.create OpInfo = some (ctx, op)) :
+theorem IRContext.create_inBounds {op: OperationPtr} [HasDialect OpInfo Builtin]
+    (h : IRContext.create OpInfo = some (ctx, op)) :
     op.InBounds ctx := by
   simp only [IRContext.create] at h
   grind (gen := 10)

@@ -3,6 +3,17 @@ import UnitTest.ParserError
 import UnitTest.Parser
 import UnitTest.AttrParser
 import UnitTest.MlirParser
+import UnitTest.IR.Operation
+import UnitTest.Dialect
+import UnitTest.Verifier
 import UnitTest.FP
 import UnitTest.Bitblasting.Bitblasting
 import UnitTest.DataFlowFramework.Dominance
+import UnitTest.DataFlowFramework.DeadCodeAnalysis
+import UnitTest.ModArithRangeAnalysis
+import UnitTest.ConstantValue
+import UnitTest.Evaluate
+import UnitTest.FoldDecision
+import UnitTest.SideEffectInterfaces
+import UnitTest.Puddle
+import UnitTest.BoundedBitblasting.BoundedBitblasting

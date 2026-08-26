@@ -2,11 +2,10 @@ module
 
 public import Veir.IR.Basic
 import all Veir.IR.Basic
-import Veir.ForLean
 
 namespace Veir
 
-variable {OpInfo : Type} [HasOpInfo OpInfo]
+variable {OpInfo : Type} [IsOpCode OpInfo]
 
 public section
 
@@ -26,6 +25,14 @@ theorem IRContext.empty_not_inBounds (ptr : GenericPtr)  :
 variable {ctx ctx' : IRContext OpInfo}
 
 section operation
+
+/-- Internal definition-building helper for dependent parent-region queries. -/
+@[grind →]
+theorem OperationPtr.in_bounds_of_parent_eq_some
+    {op : OperationPtr} {block : BlockPtr} {ctx : IRContext OpInfo}
+    (parentEq : (op.get! ctx).parent = some block) :
+    op.InBounds ctx := by
+  grind [Operation.default_parent_eq]
 
 variable {op : OperationPtr} (h : op.InBounds ctx)
 
@@ -171,14 +178,21 @@ theorem OperationPtr.setBlockOperands_OpOperandPtr_InBounds_mono_ne {opOperand :
   grind
 
 @[grind =]
-theorem OperationPtr.setProperties_genericPtr_mono (ptr : GenericPtr)  :
-    ptr.InBounds (setProperties op ctx newProperties h propEq) ↔ ptr.InBounds ctx := by
+theorem OperationPtr.setProperties_genericPtr_mono (ptr : GenericPtr)
+    {opCode : Dialect} [IsOpCode Dialect] [HasDialect OpInfo Dialect]
+    {newProperties : propertiesOf opCode}
+    {propEq : op.getOpType! ctx = opCode} :
+    ptr.InBounds (setProperties op ctx opCode newProperties h propEq) ↔ ptr.InBounds ctx := by
   grind
 
 @[grind =]
 theorem OperationPtr.setAttributes_genericPtr_mono (ptr : GenericPtr) :
     ptr.InBounds (op.setAttributes ctx newAttrs h) ↔ ptr.InBounds ctx := by
   grind
+
+variable {Dialect : Type} [IsOpCode Dialect] [HasDialect OpInfo Dialect]
+variable {ty : Dialect}
+variable {properties : propertiesOf ty}
 
 @[grind .]
 theorem OpResultPtr.allocEmpty_no_results {opResult : OpResultPtr}
@@ -200,30 +214,30 @@ theorem BlockOperandPtr.allocEmpty_no_operands {blockOperand : BlockOperandPtr}
 
 @[grind =>]
 theorem OperationPtr.allocEmpty_genericPtr_iff (ptr : GenericPtr)
-    (heq : allocEmpty ctx type properties = some (ctx', ptr')) :
+    (heq : allocEmpty ctx ty properties = some (ctx', ptr')) :
     ptr.InBounds ctx' ↔ (ptr.InBounds ctx ∨ ptr = .operation ptr') := by
   grind
 
 theorem OperationPtr.allocEmpty_operationPtr_iff (ptr : OperationPtr)
-    (heq : allocEmpty ctx type properties = some (ctx', ptr')) :
+    (heq : allocEmpty ctx ty properties = some (ctx', ptr')) :
     ptr.InBounds ctx' ↔ (ptr.InBounds ctx ∨ ptr =  ptr') := by
   grind
 
 @[grind . ]
 theorem OperationPtr.allocEmpty_genericPtr_mono (ptr : GenericPtr)
-    (heq : allocEmpty ctx type properties = some (ctx', ptr')) :
+    (heq : allocEmpty ctx ty properties = some (ctx', ptr')) :
     ptr.InBounds ctx → ptr.InBounds ctx' := by
   grind
 
 @[grind .]
 theorem OperationPtr.allocEmpty_not_inBounds
-    (heq : allocEmpty ctx type properties = some (ctx', ptr')) :
+    (heq : allocEmpty ctx ty properties = some (ctx', ptr')) :
     ¬ ptr'.InBounds ctx := by
   grind
 
 @[grind .]
 theorem OperationPtr.allocEmpty_newBlock_inBounds
-    (heq : allocEmpty ctx type properties = some (ctx', ptr)) :
+    (heq : allocEmpty ctx ty properties = some (ctx', ptr)) :
     ptr.InBounds ctx' := by
   grind
 
