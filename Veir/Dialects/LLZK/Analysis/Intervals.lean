@@ -66,9 +66,7 @@ def width (u : UnreducedInterval) : Int := u.hi - u.lo + 1
 
 /-- **Exercise F2a.** Pointwise negation: `-[lo, hi] = [-hi, -lo]`.
     C++: `operator-()` (unary). -/
-def neg (u : UnreducedInterval) : UnreducedInterval :=
-  {-u.hi, -u.low, lower_le_upper := by grind}
-
+def neg (u : UnreducedInterval) : UnreducedInterval := by sorry 
 /-- **Exercise F2b.** `[a,b] + [c,d] = [a+c, b+d]`. The `lo_le_hi` obligation
     is `omega` from the two component proofs — see
     `IntegerRangeLattice.addRange` in the ModArith file for the shape. -/
