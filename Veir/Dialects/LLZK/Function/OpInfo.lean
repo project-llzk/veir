@@ -14,7 +14,7 @@ public section
 inductive Function_ where
 | «def»
 | return
--- `call` deferred to Phase C (variadic-of-variadic + SymbolRefAttr).
+| call
 deriving Inhabited, Repr, Hashable, DecidableEq
 
 @[expose, properties_of]
@@ -22,6 +22,7 @@ def Function_.propertiesOf (op : Function_) : Type :=
 match op with
 | .«def» => FunctionDefProperties
 | .return => Unit
+| .call => FunctionCallProperties
 
 def Function_.fromAttrDict
     (op : Function_) (attrDict : Std.HashMap ByteArray Attribute) :
@@ -29,6 +30,7 @@ def Function_.fromAttrDict
   cases op
   case «def» => exact FunctionDefProperties.fromAttrDict attrDict
   case «return» => exact .ok ()
+  case call => exact FunctionCallProperties.fromAttrDict attrDict
 
 def Function_.toAttrDict
     (op : Function_) (props : Function_.propertiesOf op) :
@@ -40,13 +42,30 @@ def Function_.toAttrDict
     dict := dict.insert "function_type".toUTF8 (Attribute.functionType props.function_type)
     dict
   | .return => Std.HashMap.emptyWithCapacity 0
+  | .call => props.toAttrDict
 
+/--
+`function.call` is reported with unknown effects: the callee may be a
+`constrain` function (whose emitted constraints must not be DCE'd away)
+or a `compute` function writing struct members.
+-/
 def Function_.getEffects
-    (_op : Function_) (_props : Function_.propertiesOf _op) : MemoryEffects :=
-  .none
+    (op : Function_) (_props : Function_.propertiesOf op) : MemoryEffects :=
+  match op with
+  | .call => .unknown
+  | _ => .none
 
 def Function_.isConstantLike (_op : Function_) : Bool :=
   false
+
+/-- LLZK's `FuncDefOp` carries `IsolatedFromAbove`: a function body cannot
+    reference SSA values from enclosing regions. Previously left at the
+    silent `false` default, which let `nearestIsolatedScope?` walk past a
+    `function.def` and allowed cross-function rewiring. -/
+def Function_.isIsolatedFromAbove (op : Function_) : Bool :=
+  match op with
+  | .«def» => true
+  | _ => false
 
 def Function_.hasSSADominance (_op : Function_) (_index : Nat) : Bool :=
   true
@@ -54,7 +73,7 @@ def Function_.hasSSADominance (_op : Function_) (_index : Nat) : Bool :=
 def Function_.isTerminator (op : Function_) : Bool :=
   match op with
   | .return => true
-  | .«def» => false
+  | .«def» | .call => false
 
 #generate_dialect Function_
 
@@ -74,7 +93,7 @@ def Function_.functionInterface? (op : Function_) :
         getFunctionType := fun props => props.function_type
         setFunctionType := fun props functionType =>
           { props with function_type := functionType } }
-  | .return => none
+  | .return | .call => none
 
 /--
 Verify the local invariants of a `function` operation in any operation-info
@@ -96,6 +115,12 @@ def Function_.verifyLocalInvariants {OpInfo : Type} [IsOpCode OpInfo]
       throw "function.def: Expected 0 successors"
   -- Variadic operands: no operand-count check.
   | .return => op.verifyTerminatorCounts ctx opIn 0
+  -- Variadic operands *and* results: only region/successor counts checked.
+  | .call => do
+    if op.getNumRegions ctx.raw opIn ≠ 0 then
+      throw "function.call: Expected 0 regions"
+    if op.getNumSuccessors ctx.raw opIn ≠ 0 then
+      throw "function.call: Expected 0 successors"
 
 instance : HasOpInfo Function_ where
   verifyLocalInvariants := Function_.verifyLocalInvariants
@@ -104,6 +129,7 @@ instance : HasOpInfo Function_ where
   functionInterface? := Function_.functionInterface?
   hasSSADominance := Function_.hasSSADominance
   isTerminator := Function_.isTerminator
+  isIsolatedFromAbove := Function_.isIsolatedFromAbove
 
 end
 

@@ -446,24 +446,40 @@ def parseOptionalFlatSymbolRefAttr : AttrParserM (Option FlatSymbolRefAttr) := d
   return some (FlatSymbolRefAttr.mk ("@" ++ String.fromUTF8! name))
 
 /--
-  Parse a symbol reference — flat form only for now (`@name`).
+  Parse a symbol reference, if present: the flat form `@name` or the
+  nested form `@outer::@inner::@deep` (used by `function.call`'s `callee`
+  and `!struct.type` names).
 
-  Nested form (`@outer::@inner::@deep`) is **deferred**: VEIR's lexer
-  doesn't tokenize `::` as a punctuation symbol, so supporting the
-  nested form requires a lexer extension. No current dialect needs
-  nested refs at parse time — they're a Phase G.2/G.3 concern
-  (Polymorphic and Struct's `LLZKSymbolTable` references). The
-  `SymbolRefAttr` data structure exists in `Veir/IR/Attribute.lean`
-  for forward compatibility; this parser entry point will be
-  extended when a consumer arrives.
+  The lexer has no `::` token, so the nested-ref separator arrives as two
+  *adjacent* `:` tokens. Each separator is parsed speculatively: save the
+  parser state, and restore it when the lookahead turns out not to be a
+  separator — a lone `:` after a symbol ref belongs to the enclosing
+  syntax (e.g. a trailing type annotation), not to the reference.
 
-  Until then, this function is a thin wrapper around
-  `parseOptionalFlatSymbolRefAttr` that returns the `Attribute`
-  directly to match the dispatcher's expected type.
+  Returns `.flatSymbolRefAttr` for the flat form and `.symbolRefAttr`
+  for the nested form, so both round-trip in their original spelling.
 -/
 def parseOptionalAnySymbolRef : AttrParserM (Option Attribute) := do
   let some flat ← parseOptionalFlatSymbolRefAttr | return none
-  return some (.flatSymbolRefAttr flat)
+  let mut nestedRefs : Array String := #[]
+  repeat
+    let saved ← getThe ParserState
+    let t1 ← peekToken
+    if t1.kind ≠ .colon then break
+    let _ ← consumeToken
+    let t2 ← peekToken
+    if t2.kind ≠ .colon || t2.slice.start.byteOffset ≠ t1.slice.stop.byteOffset then
+      set saved
+      break
+    let _ ← consumeToken
+    match ← parseOptionalFlatSymbolRefAttr with
+    | some seg => nestedRefs := nestedRefs.push seg.value
+    | none =>
+      set saved
+      break
+  if nestedRefs.isEmpty then
+    return some (.flatSymbolRefAttr flat)
+  return some (.symbolRefAttr { rootRef := flat.value, nestedRefs })
 
 /--
   Parse a location attribute, if present.
@@ -721,21 +737,21 @@ def parseOptionalFeltConstAttr : AttrParserM (Option FeltConstAttr) := do
 
 /--
   Parse LLZK's `#bool<pred>` comparison-predicate attribute, if present.
-  Syntax: `#bool<eq|ne|lt|le|gt|ge>`.
+  Syntax: `#bool<eq|ne|lt|le|gt|ge>`, or with a leading `cmp` keyword
+  (`#bool<cmp lt>`) — the spelling the older `llzk-opt` generation prints
+  for the SP1 corpus.
 
-  LLZK's `FeltCmpPredicate` is an `I32EnumAttr`, so `llzk-opt
-  --mlir-print-op-generic` emits `<{predicate = #bool<lt>}>` while VEIR
-  prints the equivalent `<{predicate = 2 : i32}>`. Both spellings encode
-  the same value, so we normalise the enum form to the integer form here;
-  `BoolCmpProperties` (which stores an `IntegerAttr`) is unchanged.
+  LLZK's `FeltCmpPredicate` is an `I32EnumAttr`. The parsed form is kept
+  as a structured `BoolCmpPredicateAttr` (value + `cmp`-keyword flag) so
+  printing is faithful to the input spelling: `llzk-opt` accepts only
+  the enum form back into `bool.cmp`'s properties, so normalising to
+  `2 : i32` (as an earlier revision did) made VEIR output
+  non-reingestible by LLZK tooling. The plain-integer spelling still
+  parses as an ordinary `IntegerAttr` and still round-trips as such —
+  `BoolCmpProperties` records which spelling arrived.
 
   Upstream values: `eq=0, ne=1, lt=2, le=3, gt=4, ge=5` — kept in sync with
   the range check in `BoolCmpProperties.fromAttrDict`.
-
-  This normalisation is not print-faithful: a module read with `#bool<lt>`
-  prints back as `2 : i32`. That is deliberate — it makes real `llzk-opt`
-  output ingestible without disturbing the existing `bool.cmp` round-trip
-  tests, which are written in the integer form.
 -/
 def parseOptionalBoolCmpPredicateAttr : AttrParserM (Option Attribute) := do
   let token ← peekToken
@@ -745,6 +761,9 @@ def parseOptionalBoolCmpPredicateAttr : AttrParserM (Option Attribute) := do
   if name ≠ "bool".toByteArray then return none
   let _ ← consumeToken
   parsePunctuation "<"
+  -- Older llzk-opt prefixes the predicate with the attribute mnemonic:
+  -- `#bool<cmp lt>`. Remember whether it was present for print fidelity.
+  let withCmp ← parseOptionalKeyword "cmp".toByteArray
   let value ←
     if (← parseOptionalKeyword "eq".toByteArray) then pure (0 : Int)
     else if (← parseOptionalKeyword "ne".toByteArray) then pure 1
@@ -754,7 +773,7 @@ def parseOptionalBoolCmpPredicateAttr : AttrParserM (Option Attribute) := do
     else if (← parseOptionalKeyword "ge".toByteArray) then pure 5
     else throwString "#bool<...> expects one of eq, ne, lt, le, gt, ge"
   parsePunctuation ">"
-  return some (Attribute.integerAttr { value := value, type := { bitwidth := 32 } })
+  return some (Attribute.boolCmpPredicateAttr { value, withCmp })
 
 /--
   Parse CIRCT's HW dialect's `ModulePort::Direction` type.
@@ -975,6 +994,64 @@ partial def parseOptionalMatchOptionalType : AttrParserM (Option TypeAttr) := do
   return some (Match.OptionalType.mk inner)
 
 /--
+  Parse an LLZK struct type, if present.
+  Its syntax is `!struct.type<@Name>` or `!struct.type<@Name<[param, ...]>>`,
+  where the name may be a nested reference (`@Module::@Name`) and parameters
+  are arbitrary attributes (integers, types, symbols). Restricting parameters
+  to *concrete* attributes is a well-formedness question left to consumers;
+  the parser accepts anything `parseAttribute` accepts.
+
+  Sits in the mutual block with `parseType` because parameters recurse into
+  the general attribute grammar.
+-/
+partial def parseOptionalLLZKStructType : AttrParserM (Option TypeAttr) := do
+  let token ← peekToken
+  let .exclamationIdent := token.kind | return none
+  let input := (← getThe ParserState).input
+  let typeName := { token.slice with start := token.slice.start + 1 }.of input
+  if typeName ≠ "struct.type".toByteArray then return none
+  let _ ← consumeToken
+  parsePunctuation "<"
+  let some symRef ← parseOptionalAnySymbolRef
+    | throwString "!struct.type expects a symbol reference (`@Name`)"
+  let nameRef : SymbolRefAttr := match symRef with
+    | .flatSymbolRefAttr flat => { rootRef := flat.value, nestedRefs := #[] }
+    | .symbolRefAttr nested => nested
+    | _ => { rootRef := "", nestedRefs := #[] } -- unreachable: parseOptionalAnySymbolRef only returns symbol refs
+  let params ← do
+    if ← parseOptionalPunctuation "<" then
+      let some elems ← parseOptionalDelimitedList .square parseAttribute
+        | throwString "!struct.type parameter list (`[...]`) expected"
+      parsePunctuation ">"
+      pure (some elems)
+    else
+      pure none
+  parsePunctuation ">"
+  return some (LLZK.StructType.mk nameRef params)
+
+/--
+  Parse an LLZK array type, if present.
+  Its syntax is `!array.type<d1,d2,... x elemType>` with one or more
+  comma-separated dimensions. Only concrete non-negative integer dimensions
+  are supported; LLZK's symbolic (`@N`) and affine-map dimensions are outside
+  the modeled fragment and rejected with a parse error.
+-/
+partial def parseOptionalLLZKArrayType : AttrParserM (Option TypeAttr) := do
+  let token ← peekToken
+  let .exclamationIdent := token.kind | return none
+  let input := (← getThe ParserState).input
+  let typeName := { token.slice with start := token.slice.start + 1 }.of input
+  if typeName ≠ "array.type".toByteArray then return none
+  let _ ← consumeToken
+  parsePunctuation "<"
+  let dims ← parseList
+    (parseInteger false false "!array.type dimension expected (only concrete integer dimensions are supported)")
+  parseKeyword "x".toByteArray
+  let elemType ← parseType "!array.type element type expected"
+  parsePunctuation ">"
+  return some (LLZK.ArrayType.mk dims elemType)
+
+/--
   Parse a type, if present.
 -/
 partial def parseOptionalType : AttrParserM (Option TypeAttr) := do
@@ -994,6 +1071,10 @@ partial def parseOptionalType : AttrParserM (Option TypeAttr) := do
     return some feltType
   if let some stringType ← parseOptionalStringType then
     return some stringType
+  if let some llzkStructType ← parseOptionalLLZKStructType then
+    return some llzkStructType
+  if let some llzkArrayType ← parseOptionalLLZKArrayType then
+    return some llzkArrayType
   if let some llvmVoidType := ← parseOptionalLLVMVoidType then
     return some llvmVoidType
   if let some llvmPointerType := ← parseOptionalLLVMPointerType then

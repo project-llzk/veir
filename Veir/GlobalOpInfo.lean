@@ -40,6 +40,8 @@ match opCode with
 | .constrain op => Constrain.propertiesOf op
 | .global op => Global.propertiesOf op
 | .function op => Function_.propertiesOf op
+| .struct op => Struct.propertiesOf op
+| .array op => Array_.propertiesOf op
 
 /--
   What are the memory effects of an operation with this opcode and these
@@ -71,6 +73,8 @@ def OpCode.getEffects (opCode : OpCode) (props : _propertiesOf opCode) : MemoryE
   | .constrain op, props => Constrain.getEffects op props
   | .global op, props => Global.getEffects op props
   | .function op, props => Function_.getEffects op props
+  | .struct op, props => Struct.getEffects op props
+  | .array op, props => Array_.getEffects op props
 
 /--
   Return the kind of the region with the given index inside this operation.
@@ -101,6 +105,8 @@ def OpCode.getRegionKind (opCode : OpCode) (index : Nat) : RegionKind :=
   | .constrain op => HasOpInfo.getRegionKind op index
   | .global op => HasOpInfo.getRegionKind op index
   | .function op => HasOpInfo.getRegionKind op index
+  | .struct op => HasOpInfo.getRegionKind op index
+  | .array op => HasOpInfo.getRegionKind op index
 
 /--
   Whether definitions in the indexed region of this opcode must dominate
@@ -132,6 +138,8 @@ def OpCode.hasSSADominance (opCode : OpCode) (index : Nat) : Bool :=
   | .constrain op => Constrain.hasSSADominance op index
   | .global op => Global.hasSSADominance op index
   | .function op => Function_.hasSSADominance op index
+  | .struct op => Struct.hasSSADominance op index
+  | .array op => Array_.hasSSADominance op index
 
 /--
   Whether the indexed region of this opcode is exempt from the requirement
@@ -164,6 +172,8 @@ def OpCode.hasNoTerminator (opCode : OpCode) (index : Nat) : Bool :=
   | .constrain op => HasOpInfo.hasNoTerminator op index
   | .global op => HasOpInfo.hasNoTerminator op index
   | .function op => HasOpInfo.hasNoTerminator op index
+  | .struct op => HasOpInfo.hasNoTerminator op index
+  | .array op => HasOpInfo.hasNoTerminator op index
 
 /-- Whether this opcode carries MLIR's `IsolatedFromAbove` trait. -/
 def OpCode.isIsolatedFromAbove (opCode : OpCode) : Bool :=
@@ -192,6 +202,8 @@ def OpCode.isIsolatedFromAbove (opCode : OpCode) : Bool :=
   | .constrain op => HasOpInfo.isIsolatedFromAbove op
   | .global op => HasOpInfo.isIsolatedFromAbove op
   | .function op => HasOpInfo.isIsolatedFromAbove op
+  | .struct op => HasOpInfo.isIsolatedFromAbove op
+  | .array op => HasOpInfo.isIsolatedFromAbove op
 
 /--
   Does this OpCode count as an MLIR basic block terminator? Dialects that do
@@ -223,6 +235,8 @@ def OpCode.isTerminator (opCode : OpCode) : Bool :=
   | .constrain op => HasOpInfo.isTerminator op
   | .global op => HasOpInfo.isTerminator op
   | .function op => HasOpInfo.isTerminator op
+  | .struct op => HasOpInfo.isTerminator op
+  | .array op => HasOpInfo.isTerminator op
 
 /--
   Does this `OpCode` materialize a literal constant value, i.e. an op
@@ -258,6 +272,8 @@ def OpCode.isConstantLike (opCode : OpCode) : Bool :=
   | .constrain op => Constrain.isConstantLike op
   | .global op => Global.isConstantLike op
   | .function op => Function_.isConstantLike op
+  | .struct op => Struct.isConstantLike op
+  | .array op => Array_.isConstantLike op
 
 /--
   Does an operation with this opcode produce a wholly poisoned result whenever
@@ -289,6 +305,8 @@ def OpCode.propagatesPoison (opCode : OpCode) : Bool :=
   | .constrain op => HasOpInfo.propagatesPoison op
   | .global op => HasOpInfo.propagatesPoison op
   | .function op => HasOpInfo.propagatesPoison op
+  | .struct op => HasOpInfo.propagatesPoison op
+  | .array op => HasOpInfo.propagatesPoison op
 
 def Properties.fromAttrDict (opCode : OpCode) (attrDict : Std.HashMap ByteArray Attribute) :
     Except String (_propertiesOf opCode) :=
@@ -317,6 +335,8 @@ def Properties.fromAttrDict (opCode : OpCode) (attrDict : Std.HashMap ByteArray 
   | .constrain op => Constrain.fromAttrDict op attrDict
   | .global op => Global.fromAttrDict op attrDict
   | .function op => Function_.fromAttrDict op attrDict
+  | .struct op => Struct.fromAttrDict op attrDict
+  | .array op => Array_.fromAttrDict op attrDict
 
 /--
   Converts the properties of an operation into a dictionary of attributes.
@@ -349,6 +369,8 @@ def Properties.toAttrDict
   | .constrain op, props => Constrain.toAttrDict op props
   | .global op, props => Global.toAttrDict op props
   | .function op, props => Function_.toAttrDict op props
+  | .struct op, props => Struct.toAttrDict op props
+  | .array op, props => Array_.toAttrDict op props
 
 instance : IsOpCode OpCode where
   fromName := OpCode.fromName
@@ -384,6 +406,8 @@ def OpCode.functionInterface? (opCode : OpCode) : Option (FunctionOpInterface (_
   | .constrain op => HasOpInfo.functionInterface? op
   | .global op => HasOpInfo.functionInterface? op
   | .function op => HasOpInfo.functionInterface? op
+  | .struct op => HasOpInfo.functionInterface? op
+  | .array op => HasOpInfo.functionInterface? op
 
 #generate_has_dialect_instances OpCode
 
@@ -415,6 +439,8 @@ def OpCode.verifyLocalInvariants (opCode : OpCode) (op : OperationPtr)
   | .constrain opType => Constrain.verifyLocalInvariants opType op ctx opIn
   | .global opType => Global.verifyLocalInvariants opType op ctx opIn
   | .function opType => Function_.verifyLocalInvariants opType op ctx opIn
+  | .struct opType => Struct.verifyLocalInvariants opType op ctx opIn
+  | .array opType => Array_.verifyLocalInvariants opType op ctx opIn
 
 instance : HasOpInfo OpCode where
   verifyLocalInvariants := OpCode.verifyLocalInvariants
@@ -450,7 +476,8 @@ def OpCode.materializeConstant (opCode : OpCode) (value : RuntimeValue)
     -- LLZK: felt folding is done by the dedicated `felt-combine` pass, which
     -- carries its own verified rewrites; the rest have no constant form.
     | .felt _ | .string _ | .include _ | .ram _ | .cast _
-    | .bool _ | .constrain _ | .global _ | .function _ => none
+    | .bool _ | .constrain _ | .global _ | .function _
+    | .struct _ | .array _ => none
   guard materialized.fst.isConstantLike
   return materialized
 

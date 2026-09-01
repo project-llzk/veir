@@ -66,12 +66,14 @@ def width (u : UnreducedInterval) : Int := u.hi - u.lo + 1
 
 /-- **Exercise F2a.** Pointwise negation: `-[lo, hi] = [-hi, -lo]`.
     C++: `operator-()` (unary). -/
-def neg (u : UnreducedInterval) : UnreducedInterval := by sorry 
+def neg (u : UnreducedInterval) : UnreducedInterval :=
+  { lo := -u.hi, hi := -u.lo, lo_le_hi := by have := u.lo_le_hi; omega }
+
 /-- **Exercise F2b.** `[a,b] + [c,d] = [a+c, b+d]`. The `lo_le_hi` obligation
     is `omega` from the two component proofs — see
     `IntegerRangeLattice.addRange` in the ModArith file for the shape. -/
 def add (u v : UnreducedInterval) : UnreducedInterval :=
-  sorry
+  { lo := u.lo + v.lo, hi := u.hi + v.hi, lo_le_hi := by have := u.lo_le_hi; have := v.lo_le_hi; omega}
 
 /-- **Exercise F2c.** Subtraction. Definable as `u.add v.neg`; if you do that,
     F3's `mem_sub` should fall out of `mem_add` + `mem_neg`. -/

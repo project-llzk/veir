@@ -12,7 +12,8 @@ public section
 @[opcodes]
 inductive Constrain where
 | eq
--- `in` deferred until Array types land (Phase D.3).
+/-- `constrain.in %arr, %tuple` — lookup-containment constraint. -/
+| «in»
 deriving Inhabited, Repr, Hashable, DecidableEq
 
 @[expose, properties_of]
@@ -30,8 +31,9 @@ def Constrain.toAttrDict
   Std.HashMap.emptyWithCapacity 0
 
 /--
-`constrain.eq` emits a constraint into the circuit. It has no results, so it
-must report an effect or DCE would erase the constraint system.
+`constrain.eq` and `constrain.in` emit constraints into the circuit. They
+have no results, so they must report an effect or DCE would erase the
+constraint system.
 -/
 def Constrain.getEffects
     (_op : Constrain) (_props : Constrain.propertiesOf _op) : MemoryEffects :=
@@ -62,6 +64,7 @@ def Constrain.verifyLocalInvariants {OpInfo : Type} [IsOpCode OpInfo]
     (ctx : WfIRContext OpInfo) (opIn : op.InBounds ctx.raw) : Except String PUnit := do
   match opType with
   | .eq => op.verifyPlainOpCounts ctx opIn 2 0
+  | .«in» => op.verifyPlainOpCounts ctx opIn 2 0
 
 instance : HasOpInfo Constrain where
   verifyLocalInvariants := Constrain.verifyLocalInvariants

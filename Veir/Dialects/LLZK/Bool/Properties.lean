@@ -37,14 +37,18 @@ def BoolAssertProperties.fromAttrDict (attrDict : Std.HashMap ByteArray Attribut
   Properties of the `bool.cmp` operation.
 
   `predicate` is LLZK's `FeltCmpPredicate` enum (an `I32EnumAttr` upstream):
-  `eq=0, ne=1, lt=2, le=3, gt=4, ge=5`. We store it as a plain `IntegerAttr`
+  `eq=0, ne=1, lt=2, le=3, gt=4, ge=5`, stored as a plain `IntegerAttr`
   with `i32` type — the IntegerAttr-as-enum workaround documented in
-  `harness/porting-notes.md` (2026-05-15 enum-attr pattern). The textual
-  form in generic MLIR is `<{predicate = 0 : i32}>` instead of LLZK's
-  `<{predicate = #bool<eq>}>`; both encode the same value.
+  `harness/porting-notes.md` (2026-05-15 enum-attr pattern).
+
+  `enumSpelling` records how the predicate was written, so printing is
+  faithful and `llzk-opt` (which only accepts the enum form) can re-ingest
+  VEIR output: `none` for the integer spelling (`2 : i32`), `some withCmp`
+  for the enum spellings (`#bool<lt>` / older `#bool<cmp lt>`).
 -/
 structure BoolCmpProperties where
   predicate : IntegerAttr
+  enumSpelling : Option Bool
 deriving Inhabited, Repr, Hashable, DecidableEq
 
 def BoolCmpProperties.fromAttrDict (attrDict : Std.HashMap ByteArray Attribute) :
@@ -53,11 +57,22 @@ def BoolCmpProperties.fromAttrDict (attrDict : Std.HashMap ByteArray Attribute) 
     throw s!"bool.cmp: expected only 'predicate' property, got {attrDict.size}"
   let some attr := attrDict["predicate".toUTF8]?
     | throw "bool.cmp: missing 'predicate' property"
-  let .integerAttr intAttr := attr
-    | throw s!"bool.cmp: expected 'predicate' to be an integer attribute (enum workaround), got {attr}"
-  if intAttr.value < 0 ∨ intAttr.value > 5 then
-    throw s!"bool.cmp: 'predicate' must be in 0..5 (eq/ne/lt/le/gt/ge), got {intAttr.value}"
-  return { predicate := intAttr }
+  let (value, spelling) ← match attr with
+    | .integerAttr intAttr => pure (intAttr, none)
+    | .boolCmpPredicateAttr pred =>
+      pure (({ value := pred.value, type := { bitwidth := 32 } } : IntegerAttr),
+            some pred.withCmp)
+    | _ =>
+      throw s!"bool.cmp: expected 'predicate' to be an integer attribute or #bool<...>, got {attr}"
+  if value.value < 0 ∨ value.value > 5 then
+    throw s!"bool.cmp: 'predicate' must be in 0..5 (eq/ne/lt/le/gt/ge), got {value.value}"
+  return { predicate := value, enumSpelling := spelling }
+
+def BoolCmpProperties.predicateAttr (props : BoolCmpProperties) : Attribute :=
+  match props.enumSpelling with
+  | none => Attribute.integerAttr props.predicate
+  | some withCmp =>
+    Attribute.boolCmpPredicateAttr { value := props.predicate.value, withCmp }
 
 end
 

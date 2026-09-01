@@ -45,7 +45,7 @@ def Bool_.toAttrDict
     | none => Std.HashMap.emptyWithCapacity 0
   | .cmp =>
     (Std.HashMap.emptyWithCapacity 1).insert
-      "predicate".toUTF8 (Attribute.integerAttr props.predicate)
+      "predicate".toUTF8 props.predicateAttr
   | _ => Std.HashMap.emptyWithCapacity 0
 
 /--
