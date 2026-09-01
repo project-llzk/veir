@@ -720,6 +720,43 @@ def parseOptionalFeltConstAttr : AttrParserM (Option FeltConstAttr) := do
   return some (FeltConstAttr.mk val ft)
 
 /--
+  Parse LLZK's `#bool<pred>` comparison-predicate attribute, if present.
+  Syntax: `#bool<eq|ne|lt|le|gt|ge>`.
+
+  LLZK's `FeltCmpPredicate` is an `I32EnumAttr`, so `llzk-opt
+  --mlir-print-op-generic` emits `<{predicate = #bool<lt>}>` while VEIR
+  prints the equivalent `<{predicate = 2 : i32}>`. Both spellings encode
+  the same value, so we normalise the enum form to the integer form here;
+  `BoolCmpProperties` (which stores an `IntegerAttr`) is unchanged.
+
+  Upstream values: `eq=0, ne=1, lt=2, le=3, gt=4, ge=5` — kept in sync with
+  the range check in `BoolCmpProperties.fromAttrDict`.
+
+  This normalisation is not print-faithful: a module read with `#bool<lt>`
+  prints back as `2 : i32`. That is deliberate — it makes real `llzk-opt`
+  output ingestible without disturbing the existing `bool.cmp` round-trip
+  tests, which are written in the integer form.
+-/
+def parseOptionalBoolCmpPredicateAttr : AttrParserM (Option Attribute) := do
+  let token ← peekToken
+  let .hashIdent := token.kind | return none
+  let input := (← getThe ParserState).input
+  let name := { token.slice with start := token.slice.start + 1 }.of input
+  if name ≠ "bool".toByteArray then return none
+  let _ ← consumeToken
+  parsePunctuation "<"
+  let value ←
+    if (← parseOptionalKeyword "eq".toByteArray) then pure (0 : Int)
+    else if (← parseOptionalKeyword "ne".toByteArray) then pure 1
+    else if (← parseOptionalKeyword "lt".toByteArray) then pure 2
+    else if (← parseOptionalKeyword "le".toByteArray) then pure 3
+    else if (← parseOptionalKeyword "gt".toByteArray) then pure 4
+    else if (← parseOptionalKeyword "ge".toByteArray) then pure 5
+    else throwString "#bool<...> expects one of eq, ne, lt, le, gt, ge"
+  parsePunctuation ">"
+  return some (Attribute.integerAttr { value := value, type := { bitwidth := 32 } })
+
+/--
   Parse CIRCT's HW dialect's `ModulePort::Direction` type.
   Its syntax is `(input|output|inout)`.
 -/
@@ -1078,6 +1115,8 @@ partial def parseOptionalAttribute : AttrParserM (Option Attribute) := do
   -- fallthrough.
   if let some feltConstAttr ← parseOptionalFeltConstAttr then
     return some feltConstAttr
+  if let some boolCmpAttr ← parseOptionalBoolCmpPredicateAttr then
+    return some boolCmpAttr
   if let some dialectAttr ← parseOptionalDialectAttr then
     return some dialectAttr
   else if let some locationAttr ← parseOptionalLocationAttr then
